@@ -3,69 +3,80 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PDF TwoPage Viewer</title>
+  <title>PDF Viewer</title>
+
   <style>
-    html, body {
+    body, html {
       margin: 0;
       padding: 0;
       height: 100%;
       overflow: hidden;
-      background: black;
+      background: #000;
     }
+
     #controls {
       position: fixed;
       top: 10px;
       left: 10px;
-      z-index: 100;
+      z-index: 1000;
     }
+
     #viewer {
-      display: flex;
       height: 100%;
       width: 100%;
-      overflow-x: hidden;
+      overflow-x: scroll;
+      overflow-y: hidden;
+      white-space: nowrap;
       scroll-behavior: smooth;
     }
+
     canvas {
       height: 100%;
-      width: auto;
-      display: block;
+      display: inline-block;
+      margin: 0;
     }
   </style>
+
 </head>
 <body>
 
-  <!-- Controlli visibili SOLO prima del fullscreen -->
   <div id="controls">
     <input type="file" id="fileInput" accept="application/pdf">
-    <button id="fullscreenBtn">Fullscreen</button>
+    <button id="fs">Fullscreen</button>
   </div>
 
   <div id="viewer"></div>
 
-  <!-- IMPORTANTISSIMO: PDF.js deve essere nel tuo repository -->
-  <script src="./pdf.js"></script>
-
+  <script src="pdf.js"></script>
   <script>
-    const fileInput = document.getElementById('fileInput');
-    const fullscreenBtn = document.getElementById('fullscreenBtn');
-    const viewer = document.getElementById('viewer');
+    const fileInput = document.getElementById("fileInput");
+    const viewer = document.getElementById("viewer");
+
     let pdfDoc = null;
 
-    // --------------------------------------------
+    // ================
     // CARICAMENTO PDF
-    // --------------------------------------------
-    fileInput.addEventListener('change', async (e) => {
+    // ================
+    fileInput.addEventListener("change", async (e) => {
       const file = e.target.files[0];
       if (!file) return;
 
       const arrayBuffer = await file.arrayBuffer();
       pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
 
-      viewer.innerHTML = '';
+      viewer.innerHTML = "";
 
+      // Slot fittizio iniziale
+      const slot = document.createElement("div");
+      slot.style.display = "inline-block";
+      slot.style.width = "100vw";
+      slot.style.height = "100%";
+      viewer.appendChild(slot);
+
+      // Render di tutte le pagine
       for (let i = 1; i <= pdfDoc.numPages; i++) {
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
         viewer.appendChild(canvas);
 
         const page = await pdfDoc.getPage(i);
@@ -78,34 +89,35 @@
       }
 
       viewer.scrollLeft = 0;
-      viewer.focus();
     });
 
-    // --------------------------------------------
-    // FULLSCREEN manuale
-    // --------------------------------------------
-    fullscreenBtn.addEventListener('click', () => {
+
+    // =============
+    // FULLSCREEN
+    // =============
+    document.getElementById("fs").addEventListener("click", () => {
       document.documentElement.requestFullscreen();
-      fullscreenBtn.style.display = 'none';
-      fileInput.style.display = 'none';
     });
 
-    // --------------------------------------------
+
+    // =============================
     // NAVIGAZIONE CON FRECCE
-    // --------------------------------------------
-    window.addEventListener('keydown', (e) => {
+    // =============================
+    window.addEventListener("keydown", (e) => {
       if (!pdfDoc) return;
 
-      if (e.key === 'ArrowRight') {
-        viewer.scrollBy({ left: window.innerWidth, behavior: "smooth" });
+      const pageWidth = window.innerWidth;
+
+      if (e.key === "ArrowRight") {
+        // TRANSIZIONE FLUIDA
+        viewer.scrollBy({ left: pageWidth, behavior: "smooth" });
       }
-      else if (e.key === 'ArrowLeft') {
-        viewer.scrollBy({ left: -window.innerWidth, behavior: "instant" });
-      }
-      else if (e.key === 'Escape' && document.fullscreenElement) {
-        document.exitFullscreen();
-        fullscreenBtn.style.display = 'inline';
-        fileInput.style.display = 'inline';
+
+      if (e.key === "ArrowLeft") {
+        // ISTANTANEA SENZA ANIMAZIONE
+        viewer.style.scrollBehavior = "auto";
+        viewer.scrollBy({ left: -pageWidth });
+        viewer.style.scrollBehavior = "smooth";
       }
     });
   </script>
