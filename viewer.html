@@ -1,163 +1,183 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="it">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PDF TwoPage Viewer</title>
-  <style>
-    html, body {
-      margin: 0;
-      padding: 0;
-      height: 100%;
-      overflow: hidden;
-      background: black;
-    }
-    #controls {
-      position: fixed;
-      top: 10px;
-      left: 10px;
-      z-index: 100;
-    }
-    #viewer {
-      display: flex;
-      height: 100%;
-      width: 100%;
-      overflow-x: hidden;
-      scroll-behavior: auto; /* controlliamo noi l’animazione */
-    }
-    canvas {
-      height: 100%;
-      width: auto;
-      display: block;
-    }
-  </style>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>PDF Two-Page Viewer — scorrimento costante</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  .controls{position:fixed;top:12px;left:12px;z-index:60;display:flex;gap:8px}
+  button{background:#222;color:#fff;padding:8px 10px;border-radius:6px;cursor:pointer;border:1px solid #333}
+  .viewer{position:fixed;inset:0;display:block;overflow:hidden;background:#000}
+  .strip{height:100%;display:flex;align-items:stretch;box-sizing:border-box}
+  .slot{flex:0 0 50vw;display:flex;align-items:center;justify-content:center;overflow:hidden;height:100%}
+  canvas{display:block;max-height:100vh;width:auto;height:auto;background:#fff}
+</style>
 </head>
 <body>
 
-  <div id="controls">
-    <input type="file" id="fileInput" accept="application/pdf">
-    <button id="fullscreenBtn">Fullscreen</button>
-  </div>
+<div class="controls" id="controls">
+  <button id="chooseBtn">Scegli PDF</button>
+  <input id="fileInput" type="file" accept="application/pdf" style="display:none">
+  <button id="fullscreenBtn" disabled>Schermo intero</button>
+</div>
 
-  <div id="viewer"></div>
+<div class="viewer" id="viewer">
+  <div class="strip" id="strip"></div>
+</div>
 
-  <script src="pdf.js"></script>
-  <script>
-    const fileInput = document.getElementById('fileInput');
-    const fullscreenBtn = document.getElementById('fullscreenBtn');
-    const viewer = document.getElementById('viewer');
-    let pdfDoc = null;
+<script src="pdf.js"></script>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.js';
 
-    // -------------------------------------------------------------
-    // FUNZIONE ANIMAZIONE AVANTI (12 SECONDI VELOCITÀ COSTANTE)
-    // -------------------------------------------------------------
-    function scrollForwardSmooth(distance) {
-      const duration = 12000; // 12 secondi
-      const start = viewer.scrollLeft;
-      const end = start + distance;
-      const startTime = performance.now();
+const chooseBtn = document.getElementById('chooseBtn');
+const fileInput = document.getElementById('fileInput');
+const fullscreenBtn = document.getElementById('fullscreenBtn');
+const controls = document.getElementById('controls');
 
-      function animate(now) {
-        const elapsed = now - startTime;
-        const t = Math.min(elapsed / duration, 1); // progress 0→1 lineare
-        viewer.scrollLeft = start + (end - start) * t;
+const viewer = document.getElementById('viewer');
+const strip = document.getElementById('strip');
 
-        if (t < 1) {
-          requestAnimationFrame(animate);
-        }
-      }
+let pdfDoc = null;
+let numPages = 0;
+let slotWidth = window.innerWidth / 2;
+let leftIndex = 1;
+let totalSlots = 0;
+let animating = false;
+let animationHandle = null;
+const TRANSITION_MS = 12000; // 12 secondi
+const QUALITY_SCALE = 1.5;
 
-      requestAnimationFrame(animate);
-    }
+function createSlotElement() {
+  const s = document.createElement('div');
+  s.className = 'slot';
+  return s;
+}
 
-    // -------------------------------------------------------------
-    // CARICAMENTO DEL PDF
-    // -------------------------------------------------------------
-    fileInput.addEventListener('change', async (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
+async function renderPageCanvas(pageNum) {
+  const page = await pdfDoc.getPage(pageNum);
+  const viewport = page.getViewport({ scale: 1 });
+  const maxW = window.innerWidth / 2;
+  const maxH = window.innerHeight;
+  const scale = Math.min(maxW / viewport.width, maxH / viewport.height) * QUALITY_SCALE;
+  const scaled = page.getViewport({ scale });
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = Math.round(scaled.width);
+  canvas.height = Math.round(scaled.height);
+  await page.render({ canvasContext: ctx, viewport: scaled }).promise;
+  return canvas;
+}
 
-      const arrayBuffer = await file.arrayBuffer();
-      pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-      viewer.innerHTML = '';
+async function buildAllSlots() {
+  strip.innerHTML = '';
+  slotWidth = Math.round(window.innerWidth / 2);
+  strip.appendChild(createSlotElement()); // dummy start
+  for (let p=1; p<=numPages; p++) {
+    const slot = createSlotElement();
+    const canvas = await renderPageCanvas(p);
+    slot.appendChild(canvas);
+    strip.appendChild(slot);
+  }
+  strip.appendChild(createSlotElement()); // dummy end
+  totalSlots = numPages + 2;
+}
 
-      for (let i = 1; i <= pdfDoc.numPages; i++) {
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        viewer.appendChild(canvas);
+function animateScrollTo(targetScroll, durationMs = TRANSITION_MS) {
+  if (animationHandle) cancelAnimationFrame(animationHandle);
+  const start = performance.now();
+  const from = viewer.scrollLeft;
+  const delta = targetScroll - from;
 
-        const page = await pdfDoc.getPage(i);
-        const viewport = page.getViewport({ scale: 2.5 });
-        canvas.height = viewport.height;
-        canvas.width = viewport.width;
-        await page.render({ canvasContext: ctx, viewport }).promise;
-      }
+  function step(now) {
+    const t = Math.min(1, (now - start) / durationMs);
+    const linear = t; // 🔸 velocità costante
+    viewer.scrollLeft = from + delta * linear;
+    if (t < 1) animationHandle = requestAnimationFrame(step);
+    else animating = false;
+  }
 
-      viewer.scrollLeft = 0;
-      viewer.focus();
-    });
+  animating = true;
+  animationHandle = requestAnimationFrame(step);
+}
 
-    // -------------------------------------------------------------
-    // FULLSCREEN
-    // -------------------------------------------------------------
-    fullscreenBtn.addEventListener('click', () => {
-      const elem = document.documentElement;
-      elem.requestFullscreen();
-      fullscreenBtn.style.display = 'none';
-      fileInput.style.display = 'none';
-    });
+function scrollToLeftIndexInstant(index) {
+  const slotIndex = Math.max(1, Math.min(index, numPages));
+  viewer.scrollLeft = slotIndex * slotWidth;
+  leftIndex = slotIndex;
+}
 
-    // -------------------------------------------------------------
-    // NAVIGAZIONE TASTIERA
-    // -------------------------------------------------------------
-    window.addEventListener('keydown', (e) => {
-      if (!pdfDoc) return;
+function scrollNext() {
+  if (animating || leftIndex >= numPages) return;
+  const newIndex = leftIndex + 1;
+  const target = newIndex * slotWidth;
+  animateScrollTo(target, TRANSITION_MS); // 🔹 animata (destra)
+  leftIndex = newIndex;
+}
 
-      if (e.key === 'ArrowRight') {
-        scrollForwardSmooth(window.innerWidth); // animazione 12s
-      }
-      else if (e.key === 'ArrowLeft') {
-        viewer.scrollBy({ left: -window.innerWidth }); // istantaneo
-      }
-      else if (e.key === 'Escape' && document.fullscreenElement) {
-        document.exitFullscreen();
-        fullscreenBtn.style.display = 'inline';
-        fileInput.style.display = 'inline';
-      }
-    });
+function scrollPrev() {
+  if (animating || leftIndex <= 1) return;
+  const newIndex = leftIndex - 1;
+  scrollToLeftIndexInstant(newIndex); // 🔹 istantanea (sinistra)
+}
 
-    // -------------------------------------------------------------
-    // SWIPE SU ANDROID
-    // -------------------------------------------------------------
-    let touchStartX = 0;
-    let touchEndX = 0;
+function onKey(e) {
+  if (!pdfDoc) return;
+  if (e.key === 'ArrowRight') scrollNext();
+  else if (e.key === 'ArrowLeft') scrollPrev();
+  else if (e.key === 'Escape' && document.fullscreenElement) document.exitFullscreen();
+}
 
-    viewer.addEventListener('touchstart', (e) => {
-      touchStartX = e.changedTouches[0].screenX;
-    });
+chooseBtn.addEventListener('click', ()=>{ fileInput.value=''; fileInput.click(); });
 
-    viewer.addEventListener('touchend', (e) => {
-      touchEndX = e.changedTouches[0].screenX;
-      handleSwipe();
-    });
+fileInput.addEventListener('change', async (ev) => {
+  const f = ev.target.files && ev.target.files[0];
+  if (!f) return;
+  try {
+    const arrayBuffer = await f.arrayBuffer();
+    const loading = pdfjsLib.getDocument({ data: arrayBuffer });
+    pdfDoc = await loading.promise;
+    numPages = pdfDoc.numPages;
+    await buildAllSlots();
+    leftIndex = 1;
+    viewer.scrollLeft = leftIndex * slotWidth;
+    fullscreenBtn.disabled = false;
+  } catch (err) {
+    console.error('Errore caricamento PDF', err);
+    alert('Errore nel caricamento del PDF');
+  }
+});
 
-    function handleSwipe() {
-      if (!pdfDoc) return;
+fullscreenBtn.addEventListener('click', async () => {
+  try {
+    const docEl = document.documentElement;
+    if (docEl.requestFullscreen) await docEl.requestFullscreen();
+    else if (docEl.webkitRequestFullscreen) await docEl.webkitRequestFullscreen();
+  } catch(err) {
+    console.warn('Impossibile entrare in fullscreen', err);
+    return;
+  }
+  controls.style.display = 'none';
+  viewer.tabIndex = -1;
+  viewer.focus();
+  window.addEventListener('keydown', onKey);
+});
 
-      const delta = touchEndX - touchStartX;
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement) {
+    window.removeEventListener('keydown', onKey);
+    controls.style.display = 'flex';
+  }
+});
 
-      if (Math.abs(delta) < 50) return; // evita tocchi involontari
-
-      if (delta < 0) {
-        // Swipe verso sinistra → avanti (animato)
-        scrollForwardSmooth(window.innerWidth);
-      } else {
-        // Swipe verso destra → indietro (istantaneo)
-        viewer.scrollBy({ left: -window.innerWidth });
-      }
-    }
-
-  </script>
+window.addEventListener('resize', async () => {
+  if (!pdfDoc) return;
+  if (animationHandle) cancelAnimationFrame(animationHandle);
+  animating = false;
+  slotWidth = Math.round(window.innerWidth / 2);
+  await buildAllSlots();
+  viewer.scrollLeft = leftIndex * slotWidth;
+});
+</script>
 </body>
 </html>
-
