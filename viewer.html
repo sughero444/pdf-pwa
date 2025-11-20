@@ -49,7 +49,8 @@ let totalSlots = 0;
 let animating = false;
 let animationHandle = null;
 const TRANSITION_MS = 12000; // 12 secondi
-const QUALITY_SCALE = 1.5;
+const QUALITY_SCALE = Math.min(5, Math.max(2, window.devicePixelRatio * 2));
+
 
 function createSlotElement() {
   const s = document.createElement('div');
@@ -58,13 +59,34 @@ function createSlotElement() {
 }
 
 async function renderPageCanvas(pageNum) {
-  const page = await pdfDoc.getPage(pageNum);
-  const viewport = page.getViewport({ scale: 1 });
-  const maxW = window.innerWidth / 2;
-  const maxH = window.innerHeight;
-  const scale = Math.min(maxW / viewport.width, maxH / viewport.height) * QUALITY_SCALE;
-  const scaled = page.getViewport({ scale });
+  const page = await pdfDoc.getPage(pageNum);const viewport = page.getViewport({ scale: 1 });
+
+// RISOLUZIONE TARGET MASSIMA
+const targetWidth = viewport.width * QUALITY_SCALE;
+const targetHeight = viewport.height * QUALITY_SCALE;
+
+// MAINTAIN ASPECT RATIO
+const ratio = viewport.width / viewport.height;
+
+let finalWidth = targetWidth;
+let finalHeight = finalWidth / ratio;
+
+if (finalHeight > targetHeight) {
+  finalHeight = targetHeight;
+  finalWidth = finalHeight * ratio;
+}
+
+// Ricava finalmente lo scale effettivo
+const scale = finalWidth / viewport.width;
+
+const scaled = page.getViewport({ scale });
+
+ 
   const canvas = document.createElement('canvas');
+  
+  canvas.style.width = scaled.width / window.devicePixelRatio + "px";
+  canvas.style.height = scaled.height / window.devicePixelRatio + "px";
+
   const ctx = canvas.getContext('2d');
   canvas.width = Math.round(scaled.width);
   canvas.height = Math.round(scaled.height);
