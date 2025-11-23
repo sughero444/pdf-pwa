@@ -3,67 +3,137 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>PDF Two-Page Viewer — Google Drive Edition</title>
+<title>PDF Two-Page Viewer — Drive + Animazione</title>
 
 <style>
-  html,body{margin:0;height:100%;background:#000;overflow:hidden}
-  .controls{position:fixed;top:12px;left:12px;z-index:60;display:flex;gap:8px}
-  button{background:#222;color:#fff;padding:8px 10px;border-radius:6px;cursor:pointer;border:1px solid #333}
-  .viewer{position:fixed;inset:0;display:block;overflow:hidden;background:#000}
-  .strip{height:100%;display:flex;align-items:stretch;box-sizing:border-box}
-  .slot{flex:0 0 50vw;display:flex;align-items:center;justify-content:center;overflow:hidden;height:100%}
-  canvas{display:block;max-height:100vh;width:auto;height:auto;background:#fff}
+  html,body{
+    margin:0;
+    height:100%;
+    background:#000;
+    overflow:hidden;
+  }
 
-  /* Popup URL */
-  #urlPopup {
-    position:fixed; top:0; left:0; right:0; bottom:0;
-    background:rgba(0,0,0,0.8);
-    display:none; align-items:center; justify-content:center;
-    z-index:200;
+  .controls{
+    position:fixed;
+    top:12px;
+    left:12px;
+    z-index:60;
+    display:flex;
+    gap:8px;
   }
-  #urlBox {
-    background:#222; padding:20px; border-radius:12px;
-    width:90%; max-width:420px;
-    display:flex; flex-direction:column; gap:12px;
+
+  button{
+    background:#222;
+    color:#fff;
+    padding:8px 10px;
+    border-radius:6px;
+    cursor:pointer;
+    border:1px solid #333;
   }
-  input[type=text]{padding:8px; border-radius:6px; border:1px solid #444; background:#111; color:#fff;}
+
+  .viewer{
+    position:fixed;
+    inset:0;
+    display:block;
+    overflow:hidden;
+    background:#000;
+  }
+
+  .strip{
+    height:100%;
+    display:flex;
+    align-items:stretch;
+    box-sizing:border-box;
+  }
+
+  .slot{
+    flex:0 0 50vw;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    overflow:hidden;
+    height:100%;
+  }
+
+  canvas{
+    display:block;
+    max-height:100vh;
+    width:auto;
+    height:auto;
+    background:#fff;
+  }
+
+  /* ─────────────── DRIVE OVERLAY ─────────────── */
+
+  #driveOverlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: #000;
+    display: none;
+    flex-direction: column;
+    z-index: 9999;
+  }
+
+  #driveFrame {
+    flex: 1;
+    width: 100%;
+    border: none;
+  }
+
+  #closeDriveBtn {
+    background:#222;
+    color:#fff;
+    padding:10px;
+    border:none;
+    font-size:18px;
+    cursor:pointer;
+    width:100%;
+  }
 </style>
 </head>
-
 <body>
+
+<!-- ─────────────────────── CONTROLLI ─────────────────────── -->
 
 <div class="controls" id="controls">
   <button id="chooseBtn">Scegli PDF</button>
   <input id="fileInput" type="file" accept="application/pdf" style="display:none">
-
-  <button id="driveBtn">Drive</button>
   <button id="fullscreenBtn" disabled>Schermo intero</button>
+  <button id="openDriveBtn">Apri Drive</button>
 </div>
 
-<div id="urlPopup">
-  <div id="urlBox">
-    <div style="color:#fff;font-size:16px;">Incolla qui il link del PDF da Google Drive:</div>
-    <input type="text" id="driveUrlInput" placeholder="https://drive.google.com/...">
-    <button id="loadDriveBtn">Carica PDF</button>
-    <button id="closePopupBtn">Annulla</button>
-  </div>
-</div>
+<!-- ─────────────────── VIEWER PDF ─────────────────── -->
 
 <div class="viewer" id="viewer">
   <div class="strip" id="strip"></div>
 </div>
 
+<!-- ─────────────────── DRIVE OVERLAY ─────────────────── -->
+
+<div id="driveOverlay">
+  <button id="closeDriveBtn">Chiudi Drive</button>
+  <iframe id="driveFrame" src=""></iframe>
+</div>
+
+<!-- ─────────────────── PDF.JS ─────────────────── -->
+
 <script src="pdf.js"></script>
+
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.js';
 
 const chooseBtn = document.getElementById('chooseBtn');
 const fileInput = document.getElementById('fileInput');
 const fullscreenBtn = document.getElementById('fullscreenBtn');
-const driveBtn = document.getElementById('driveBtn');
+const openDriveBtn = document.getElementById('openDriveBtn');
+const controls = document.getElementById('controls');
 
 const viewer = document.getElementById('viewer');
 const strip = document.getElementById('strip');
+
+const driveOverlay = document.getElementById("driveOverlay");
+const driveFrame = document.getElementById("driveFrame");
+const closeDriveBtn = document.getElementById("closeDriveBtn");
 
 let pdfDoc = null;
 let numPages = 0;
@@ -74,65 +144,67 @@ let animating = false;
 let animationHandle = null;
 
 const TRANSITION_MS = 12000;
-const QUALITY_SCALE = 2.0;
+const QUALITY_SCALE = 1.8;
 
-/* Popup elementi */
-const urlPopup = document.getElementById("urlPopup");
-const driveUrlInput = document.getElementById("driveUrlInput");
-const loadDriveBtn = document.getElementById("loadDriveBtn");
-const closePopupBtn = document.getElementById("closePopupBtn");
+/* ───────────────────── FUNZIONI PDF ───────────────────── */
 
-/* FUNZIONI */
-function createSlotElement() {
+function createSlotElement(){
   const s = document.createElement('div');
   s.className = 'slot';
   return s;
 }
 
-async function renderPageCanvas(pageNum) {
+async function renderPageCanvas(pageNum){
   const page = await pdfDoc.getPage(pageNum);
   const viewport = page.getViewport({ scale: 1 });
 
   const maxW = window.innerWidth / 2;
   const maxH = window.innerHeight;
-  const scale = Math.min(maxW / viewport.width, maxH / viewport.height) * QUALITY_SCALE;
 
+  const scale = Math.min(maxW / viewport.width, maxH / viewport.height) * QUALITY_SCALE;
   const scaled = page.getViewport({ scale });
+
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
+
   canvas.width = Math.round(scaled.width);
   canvas.height = Math.round(scaled.height);
 
   await page.render({ canvasContext: ctx, viewport: scaled }).promise;
+
   return canvas;
 }
 
-async function buildAllSlots() {
+async function buildAllSlots(){
   strip.innerHTML = '';
   slotWidth = Math.round(window.innerWidth / 2);
 
   strip.appendChild(createSlotElement());
-  for (let p=1; p<=numPages; p++) {
+
+  for(let p=1; p<=numPages; p++){
     const slot = createSlotElement();
     const canvas = await renderPageCanvas(p);
     slot.appendChild(canvas);
     strip.appendChild(slot);
   }
-  strip.appendChild(createSlotElement());
 
+  strip.appendChild(createSlotElement());
   totalSlots = numPages + 2;
 }
 
-function animateScrollTo(targetScroll, durationMs = TRANSITION_MS) {
-  if (animationHandle) cancelAnimationFrame(animationHandle);
+/* ───────────────────── SCROLL / ANIMAZIONI ───────────────────── */
+
+function animateScrollTo(targetScroll, durationMs = TRANSITION_MS){
+  if(animationHandle) cancelAnimationFrame(animationHandle);
+
   const start = performance.now();
   const from = viewer.scrollLeft;
   const delta = targetScroll - from;
 
-  function step(now) {
+  function step(now){
     const t = Math.min(1, (now - start) / durationMs);
     viewer.scrollLeft = from + delta * t;
-    if (t < 1) animationHandle = requestAnimationFrame(step);
+    if(t < 1) animationHandle = requestAnimationFrame(step);
     else animating = false;
   }
 
@@ -140,118 +212,107 @@ function animateScrollTo(targetScroll, durationMs = TRANSITION_MS) {
   animationHandle = requestAnimationFrame(step);
 }
 
-function scrollToLeftIndexInstant(index) {
+function scrollToLeftIndexInstant(index){
   const slotIndex = Math.max(1, Math.min(index, numPages));
   viewer.scrollLeft = slotIndex * slotWidth;
   leftIndex = slotIndex;
 }
 
-function scrollNext() {
-  if (animating || leftIndex >= numPages) return;
+function scrollNext(){
+  if(animating || leftIndex >= numPages) return;
   const newIndex = leftIndex + 1;
-  animateScrollTo(newIndex * slotWidth, TRANSITION_MS);
+  const target = newIndex * slotWidth;
+  animateScrollTo(target, TRANSITION_MS);
   leftIndex = newIndex;
 }
 
-function scrollPrev() {
-  if (animating || leftIndex <= 1) return;
-  scrollToLeftIndexInstant(leftIndex - 1);
+function scrollPrev(){
+  if(animating || leftIndex <= 1) return;
+  const newIndex = leftIndex - 1;
+  scrollToLeftIndexInstant(newIndex);
 }
 
-/* EVENTI */
+/* ───────────────────── INPUT DA TASTIERA ───────────────────── */
 
-chooseBtn.addEventListener('click', ()=>{ fileInput.value=''; fileInput.click(); });
+function onKey(e){
+  if(!pdfDoc) return;
+  if(e.key === 'ArrowRight') scrollNext();
+  else if(e.key === 'ArrowLeft') scrollPrev();
+  else if(e.key === 'Escape' && document.fullscreenElement) document.exitFullscreen();
+}
 
-fileInput.addEventListener('change', async (ev) => {
-  const f = ev.target.files?.[0];
-  if (!f) return;
+/* ───────────────────── EVENTI PDF ───────────────────── */
 
-  try {
+chooseBtn.addEventListener('click', ()=>{
+  fileInput.value = '';
+  fileInput.click();
+});
+
+fileInput.addEventListener('change', async (ev)=>{
+  const f = ev.target.files && ev.target.files[0];
+  if(!f) return;
+
+  try{
     const arrayBuffer = await f.arrayBuffer();
     const loading = pdfjsLib.getDocument({ data: arrayBuffer });
     pdfDoc = await loading.promise;
-    numPages = pdfDoc.numPages;
 
+    numPages = pdfDoc.numPages;
     await buildAllSlots();
 
     leftIndex = 1;
-    viewer.scrollLeft = slotWidth;
-    fullscreenBtn.disabled = false;
+    viewer.scrollLeft = leftIndex * slotWidth;
 
-  } catch (err) {
+    fullscreenBtn.disabled = false;
+  }catch(err){
     console.error(err);
-    alert("Errore nel caricamento PDF");
+    alert("Errore nel caricamento del PDF");
   }
 });
 
-/* Pulsante Drive → apre popup */
-driveBtn.addEventListener("click", () => {
-  urlPopup.style.display = "flex";
+/* ───────────────────── FULLSCREEN ───────────────────── */
+
+fullscreenBtn.addEventListener('click', async()=>{
+  try{
+    const docEl = document.documentElement;
+    if(docEl.requestFullscreen) await docEl.requestFullscreen();
+    controls.style.display = 'none';
+    viewer.focus();
+    window.addEventListener('keydown', onKey);
+  }catch(e){}
 });
 
-/* Chiudi popup */
-closePopupBtn.addEventListener("click", () => {
-  urlPopup.style.display = "none";
-  driveUrlInput.value = "";
-});
-
-/* Carica PDF da URL */
-loadDriveBtn.addEventListener("click", async () => {
-  const url = driveUrlInput.value.trim();
-  if (!url) return;
-
-  urlPopup.style.display = "none";
-
-  try {
-    const res = await fetch(url);
-    const buf = await res.arrayBuffer();
-
-    const loading = pdfjsLib.getDocument({ data: buf });
-    pdfDoc = await loading.promise;
-    numPages = pdfDoc.numPages;
-
-    await buildAllSlots();
-    leftIndex = 1;
-    viewer.scrollLeft = slotWidth;
-    fullscreenBtn.disabled = false;
-
-  } catch (err) {
-    console.error(err);
-    alert("Errore nel caricamento del PDF da URL");
-  }
-});
-
-fullscreenBtn.addEventListener('click', async () => {
-  try {
-    await document.documentElement.requestFullscreen();
-  } catch(e){}
-  controls.style.display = 'none';
-  viewer.tabIndex = -1;
-  viewer.focus();
-
-  window.addEventListener('keydown', onKey);
-});
-
-function onKey(e){
-  if (!pdfDoc) return;
-  if (e.key === 'ArrowRight') scrollNext();
-  if (e.key === 'ArrowLeft') scrollPrev();
-}
-
-document.addEventListener('fullscreenchange', () => {
-  if (!document.fullscreenElement) {
+document.addEventListener('fullscreenchange', ()=>{
+  if(!document.fullscreenElement){
     controls.style.display = 'flex';
     window.removeEventListener('keydown', onKey);
   }
 });
 
-window.addEventListener('resize', async () => {
-  if (!pdfDoc) return;
-  if (animationHandle) cancelAnimationFrame(animationHandle);
+/* ───────────────────── RESIZE ───────────────────── */
+
+window.addEventListener('resize', async()=>{
+  if(!pdfDoc) return;
+  if(animationHandle) cancelAnimationFrame(animationHandle);
   animating = false;
+
   slotWidth = Math.round(window.innerWidth / 2);
   await buildAllSlots();
   viewer.scrollLeft = leftIndex * slotWidth;
+});
+
+/* ───────────────────── GOOGLE DRIVE ───────────────────── */
+
+openDriveBtn.addEventListener("click", () => {
+  driveFrame.src = "https://drive.google.com/drive/u/0/my-drive";
+  driveOverlay.style.display = "flex";
+  controls.style.display = "none";
+});
+
+closeDriveBtn.addEventListener("click", () => {
+  driveOverlay.style.display = "none";
+  driveFrame.src = "";
+  controls.style.display = "flex";
 });
 </script>
 
