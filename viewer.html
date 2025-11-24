@@ -3,247 +3,268 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>PDF Two-Page Viewer — scorrimento costante</title>
-
+<title>PDF → Video (Two-page scroll)</title>
 <style>
-  html,body{
-    margin:0;
-    height:100%;
-    background:#000;
-    overflow:hidden;
-  }
-  .controls{
-    position:fixed;
-    top:12px;
-    left:12px;
-    z-index:60;
-    display:flex;
-    gap:8px;
-  }
-  button{
-    background:#222;
-    color:#fff;
-    padding:8px 10px;
-    border-radius:6px;
-    cursor:pointer;
-    border:1px solid #333;
-  }
-  .viewer{
-    position:fixed;
-    inset:0;
-    display:block;
-    overflow:hidden;
-    background:#000;
-  }
-  .strip{
-    height:100%;
-    display:flex;
-    align-items:stretch;
-    box-sizing:border-box;
-  }
-  .slot{
-    flex:0 0 50vw;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    overflow:hidden;
-    height:100%;
-  }
-  canvas{
-    display:block;
-    background:#fff;
-    max-height:100vh;
-    max-width:50vw;
-    width:auto;
-    height:100%;
-    object-fit:contain;
-  }
+  html,body{margin:0;height:100%;background:#000;color:#fff;font-family:system-ui,Arial}
+  .controls{position:fixed;top:10px;left:10px;z-index:999;display:flex;gap:8px;align-items:center}
+  button,input,select{padding:8px;border-radius:6px;border:0;background:#222;color:#fff;cursor:pointer}
+  #status{margin-left:8px;font-size:14px}
+  #videoWrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#000}
+  video{max-width:100%;max-height:100%;background:#000}
 </style>
 </head>
 <body>
 
-<div class="controls" id="controls">
-  <button id="chooseBtn">Scegli PDF</button>
-  <input id="fileInput" type="file" accept="application/pdf" style="display:none">
-  <button id="fullscreenBtn" disabled>Schermo intero</button>
+<div class="controls">
+  <input id="fileInput" type="file" accept="application/pdf">
+  <label style="display:flex;gap:6px;align-items:center">
+    Res:
+    <select id="resolution">
+      <option value="1280x720">1280×720</option>
+      <option value="1920x1080" selected>1920×1080</option>
+      <option value="3840x2160">3840×2160 (heavy)</option>
+    </select>
+  </label>
+  <label>FPS:
+    <select id="fps"><option>24</option><option>25</option><option selected>30</option></select>
+  </label>
+  <button id="generateBtn">Genera Video</button>
+  <button id="downloadBtn" style="display:none">Scarica</button>
+  <span id="status"></span>
 </div>
 
-<div class="viewer" id="viewer">
-  <div class="strip" id="strip"></div>
+<div id="videoWrap" style="display:none">
+  <video id="player" controls playsinline></video>
 </div>
 
 <script src="pdf.js"></script>
 <script>
+/*
+  PDF -> Video generator
+  - render pages with pdf.js to offscreen canvases sized pageW x pageH
+  - create a record canvas of size videoW x videoH
+  - for each segment (from leftIndex to leftIndex+1) animate offset from 0→pageW in duration stepSecs (12s)
+  - capture stream and record using MediaRecorder
+  - finally show video in <video> element in paused state
+*/
+
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.js';
 
-const chooseBtn = document.getElementById('chooseBtn');
 const fileInput = document.getElementById('fileInput');
-const fullscreenBtn = document.getElementById('fullscreenBtn');
-const controls = document.getElementById('controls');
-const viewer = document.getElementById('viewer');
-const strip = document.getElementById('strip');
+const generateBtn = document.getElementById('generateBtn');
+const downloadBtn = document.getElementById('downloadBtn');
+const status = document.getElementById('status');
+const playerWrap = document.getElementById('videoWrap');
+const player = document.getElementById('player');
+const resSelect = document.getElementById('resolution');
+const fpsSelect = document.getElementById('fps');
 
 let pdfDoc = null;
-let numPages = 0;
-let slotWidth = window.innerWidth / 2;
-let leftIndex = 1;
-let animating = false;
-let animationHandle = null;
+let pagesCanvas = []; // per-page pre-rendered canvases (each page as canvas sized pageW x pageH)
+let pageCount = 0;
 
-const TRANSITION_MS = 12000; 
-const QUALITY_SCALE = Math.min(5, Math.max(2, window.devicePixelRatio * 2));
+// config
+const stepSeconds = 12; // 12s per page shift (lato sinistro -> successivo)
+const pairStride = 1;   // avanzare di una pagina (da (1,2) a (2,3))
 
-function createSlotElement() {
-  const s = document.createElement('div');
-  s.className = 'slot';
-  return s;
-}
+function log(s){ status.textContent = s; }
 
-/* -------------- RENDER PAGE MIGLIORATO (pagina intera, non zoomata!) ---------------- */
+fileInput.addEventListener('change', async (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  log('Caricamento PDF...');
+  const buf = await f.arrayBuffer();
+  pdfDoc = await pdfjsLib.getDocument({ data: buf }).promise;
+  pageCount = pdfDoc.numPages;
+  log(`PDF caricato — ${pageCount} pagine`);
+});
 
-async function renderPageCanvas(pageNum) {
-  const page = await pdfDoc.getPage(pageNum);
-  const viewport = page.getViewport({ scale: QUALITY_SCALE });
+generateBtn.addEventListener('click', async () => {
+  if (!pdfDoc) { alert('Seleziona prima un PDF'); return; }
 
-  const canvas = document.createElement('canvas');
-  canvas.width = viewport.width;
-  canvas.height = viewport.height;
+  // parse resolution
+  const [videoW, videoH] = resSelect.value.split('x').map(Number);
+  const fps = Number(fpsSelect.value);
+  const pageW = Math.round(videoW / 2); // ogni pagina occupa metà larghezza del video
+  const pageH = videoH;
 
-  // Mostra la pagina intera senza zoom ritagliato
-  canvas.style.width = "auto";
-  canvas.style.height = "100%";
-  canvas.style.maxHeight = "100vh";
-  canvas.style.maxWidth = "50vw";
-  canvas.style.objectFit = "contain";
+  // warn user
+  log('Inizio prerendering pagine (potrebbe richiedere tempo) ...');
+  generateBtn.disabled = true;
 
-  const ctx = canvas.getContext('2d');
-  await page.render({ canvasContext: ctx, viewport }).promise;
-
-  return canvas;
-}
-
-/* --------------------------------------------------------------------------- */
-
-async function buildAllSlots() {
-  strip.innerHTML = '';
-  slotWidth = Math.round(window.innerWidth / 2);
-
-  strip.appendChild(createSlotElement()); // dummy start
-
-  for (let p = 1; p <= numPages; p++) {
-    const slot = createSlotElement();
-    const canvas = await renderPageCanvas(p);
-    slot.appendChild(canvas);
-    strip.appendChild(slot);
+  // prerender pages at pageW x pageH using high quality scale
+  pagesCanvas = [];
+  for (let p = 1; p <= pageCount; p++) {
+    log(`Render pagina ${p}/${pageCount} ...`);
+    // render page to canvas at size pageW x pageH preserving aspect
+    const page = await pdfDoc.getPage(p);
+    const viewport = page.getViewport({ scale: 1 });
+    // compute scale to fit page into pageW x pageH while keeping aspect ratio
+    const targetScaleX = pageW / viewport.width;
+    const targetScaleY = pageH / viewport.height;
+    // choose scale as max to fill and crop? we want fit, so pick min
+    const scale = Math.min(targetScaleX, targetScaleY) * (window.devicePixelRatio || 1) * 1.5; // extra quality
+    const scaled = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(scaled.width);
+    canvas.height = Math.round(scaled.height);
+    // we will display canvas scaled down to pageW x pageH later
+    const ctx = canvas.getContext('2d', { alpha:false });
+    await page.render({ canvasContext: ctx, viewport: scaled }).promise;
+    pagesCanvas.push({ canvas, naturalW: scaled.width, naturalH: scaled.height });
   }
 
-  strip.appendChild(createSlotElement()); // dummy end
-}
+  log('Prerendering completato. Preparazione registrazione video...');
 
-function animateScrollTo(targetScroll, durationMs = TRANSITION_MS) {
-  if (animationHandle) cancelAnimationFrame(animationHandle);
+  // Prepare recording canvas
+  const recordCanvas = document.createElement('canvas');
+  recordCanvas.width = videoW;
+  recordCanvas.height = videoH;
+  const rctx = recordCanvas.getContext('2d', { alpha:false });
 
-  const start = performance.now();
-  const from = viewer.scrollLeft;
-  const delta = targetScroll - from;
+  // draw initial black
+  rctx.fillStyle = '#000';
+  rctx.fillRect(0,0,videoW,videoH);
 
-  function step(now) {
-    const t = Math.min(1, (now - start) / durationMs);
-    viewer.scrollLeft = from + delta * t; // lineare
+  // capture stream
+  const stream = recordCanvas.captureStream(fps);
+  // try high bitrate if supported (not in MediaRecorder options in all browsers)
+  const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ?
+               'video/webm;codecs=vp9' :
+               (MediaRecorder.isTypeSupported('video/webm;codecs=vp8') ? 'video/webm;codecs=vp8' : 'video/webm');
 
-    if (t < 1) {
-      animationHandle = requestAnimationFrame(step);
-    } else {
-      animating = false;
+  let options = { mimeType: mime };
+  // bitrate not widely supported in all browsers; some accept videoBitsPerSecond
+  options.videoBitsPerSecond = 5_000_000; // 5 Mbps as baseline; increase if needed
+
+  log(`Recording con ${mime} ${videoW}x${videoH} @ ${fps}fps, passo ${stepSeconds}s`);
+
+  const recorder = new MediaRecorder(stream, options);
+  const chunks = [];
+  recorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+  recorder.onerror = (e) => console.error('MediaRecorder error', e);
+  recorder.onstart = () => log('Recording avviata...');
+  recorder.onstop = () => log('Recording terminato, generazione file...');
+
+  recorder.start();
+
+  // helper: draw a frame given a globalOffsetX (in pixels) where pages are placed horizontally
+  // Layout: We logically place pages side by side horizontally with a left dummy slot to center first spread.
+  // But simpler: for step from page i (left) to i+1 (left), offset travels from 0 to pageW.
+  function drawFrameForOffset(offsetX) {
+    // clear
+    rctx.fillStyle = '#000';
+    rctx.fillRect(0,0,videoW,videoH);
+
+    // compute which page is left-most visible index: we will render pages into positions
+    // We'll draw enough pages to cover the viewport: draw pages from index startIndex ... startIndex+3
+    // For simplicity, build a function mapping page index to X position:
+    // define logical X position for page k (1-based): posX = (k-1) * pageW - offsetX
+    // we center so that pages are drawn starting at x=0
+    for (let k = 1; k <= pageCount; k++) {
+      const posX = Math.round((k-1) * pageW - offsetX);
+      // draw only if visible
+      if (posX + pageW < 0 || posX > videoW) continue;
+      const pc = pagesCanvas[k-1];
+      // draw pc.canvas scaled to pageW x pageH centered vertically
+      // compute destination rectangle
+      const destW = pageW;
+      const destH = pageH;
+      const destX = posX;
+      const destY = 0;
+      rctx.drawImage(pc.canvas, 0,0, pc.naturalW, pc.naturalH, destX, destY, destW, destH);
     }
   }
 
-  animating = true;
-  animationHandle = requestAnimationFrame(step);
-}
+  // For each step from leftIndex = 1..(pageCount-1) we need to animate offset 0 -> pageW in stepSeconds seconds
+  const totalSteps = Math.max(0, pageCount - 1); // number of transitions
+  const frameCountPerStep = Math.round(stepSeconds * fps);
 
-function scrollToLeftIndexInstant(index) {
-  const slotIndex = Math.max(1, Math.min(index, numPages));
-  viewer.scrollLeft = slotIndex * slotWidth;
-  leftIndex = slotIndex;
-}
-
-function scrollNext() {
-  if (animating || leftIndex >= numPages) return;
-  const newIndex = leftIndex + 1;
-  animateScrollTo(newIndex * slotWidth, TRANSITION_MS);
-  leftIndex = newIndex;
-}
-
-function scrollPrev() {
-  if (animating || leftIndex <= 1) return;
-  scrollToLeftIndexInstant(leftIndex - 1);
-}
-
-function onKey(e) {
-  if (!pdfDoc) return;
-  if (e.key === 'ArrowRight') scrollNext();
-  else if (e.key === 'ArrowLeft') scrollPrev();
-  else if (e.key === 'Escape' && document.fullscreenElement)
-    document.exitFullscreen();
-}
-
-chooseBtn.addEventListener('click', () => {
-  fileInput.value = '';
-  fileInput.click();
-});
-
-fileInput.addEventListener('change', async (ev) => {
-  const f = ev.target.files && ev.target.files[0];
-  if (!f) return;
-
-  try {
-    const arrayBuffer = await f.arrayBuffer();
-    pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-
-    numPages = pdfDoc.numPages;
-    await buildAllSlots();
-
-    leftIndex = 1;
-    viewer.scrollLeft = leftIndex * slotWidth;
-
-    fullscreenBtn.disabled = false;
-  } catch (err) {
-    console.error('Errore PDF', err);
-    alert('Errore nel caricamento del PDF');
-  }
-});
-
-fullscreenBtn.addEventListener('click', async () => {
-  try {
-    await document.documentElement.requestFullscreen();
-  } catch (err) {
-    console.warn('Fullscreen fallito', err);
+  // iterate transitions
+  for (let i = 0; i < totalSteps; i++) {
+    // for frame f in 0..frameCountPerStep-1
+    for (let f = 0; f < frameCountPerStep; f++) {
+      const t = f / frameCountPerStep; // 0..1
+      const offsetX = (i * pageW) + (t * pageW); // global offset (we keep sliding across full pages)
+      drawFrameForOffset(offsetX);
+      // allow browser to paint to stream (no sleep)
+      await new Promise(requestAnimationFrame);
+    }
   }
 
-  controls.style.display = 'none';
-  viewer.focus();
-
-  window.addEventListener('keydown', onKey);
-});
-
-document.addEventListener('fullscreenchange', () => {
-  if (!document.fullscreenElement) {
-    window.removeEventListener('keydown', onKey);
-    controls.style.display = 'flex';
+  // final hold: draw last position for 0.5s
+  for (let f=0; f < Math.round(0.5 * fps); f++){
+    drawFrameForOffset((totalSteps) * pageW);
+    await new Promise(requestAnimationFrame);
   }
+
+  // stop recorder
+  recorder.stop();
+
+  // wait for stop event to flush data
+  await new Promise(resolve => {
+    recorder.onstop = resolve;
+  });
+
+  const blob = new Blob(chunks, { type: mime });
+  log('Video pronto, dimensione ' + Math.round(blob.size / 1024) + ' KB');
+
+  // create object url
+  const url = URL.createObjectURL(blob);
+  player.src = url;
+  player.controls = false;
+  playerWrap.style.display = 'flex';
+  downloadBtn.style.display = 'inline';
+  downloadBtn.onclick = () => {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'pdf_scroll.webm';
+    a.click();
+  };
+
+  // pause at start as requested
+  player.pause();
+  player.currentTime = 0;
+
+  // setup playback stepping: press ArrowRight -> play 12s then pause
+  let stepTimer = null;
+  window.addEventListener('keydown', (ev) => {
+    if (!playerWrap.style.display || playerWrap.style.display === 'none') return;
+    if (ev.key === 'ArrowRight') {
+      // start playing for exactly stepSeconds (or until end)
+      if (!player.paused) {
+        // if already playing do nothing
+        return;
+      }
+      // request fullscreen for best effect
+      if (player.requestFullscreen) {
+        player.requestFullscreen().catch(()=>{});
+      }
+      player.play().then(()=> {
+        if (stepTimer) clearTimeout(stepTimer);
+        stepTimer = setTimeout(() => {
+          player.pause();
+          // keep fullscreen (but no controls) — user can press Esc to exit
+        }, stepSeconds * 1000);
+      }).catch(err => console.error('Play error', err));
+    } else if (ev.key === 'ArrowLeft') {
+      // jump back one step
+      const newTime = Math.max(0, player.currentTime - stepSeconds);
+      player.currentTime = newTime;
+      player.pause();
+    } else if (ev.key === 'Escape') {
+      if (document.fullscreenElement) document.exitFullscreen().catch(()=>{});
+    }
+  });
+
+  // ensure no UI overlays from controls
+  player.style.outline = 'none';
+  player.controls = false;
+
+  generateBtn.disabled = false;
+  log('Pronto. Premi freccia destra per avanzare (12s per passo).');
 });
 
-window.addEventListener('resize', async () => {
-  if (!pdfDoc) return;
-  if (animationHandle) cancelAnimationFrame(animationHandle);
-
-  animating = false;
-  slotWidth = Math.round(window.innerWidth / 2);
-
-  await buildAllSlots();
-  viewer.scrollLeft = leftIndex * slotWidth;
-});
 </script>
 </body>
 </html>
