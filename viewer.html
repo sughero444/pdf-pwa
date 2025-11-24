@@ -4,17 +4,60 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>PDF Two-Page Viewer — scorrimento costante</title>
-<link rel="manifest" href="manifest.json">
-<meta name="theme-color" content="#000000">
 
 <style>
-  html,body{margin:0;height:100%;background:#000;overflow:hidden}
-  .controls{position:fixed;top:12px;left:12px;z-index:60;display:flex;gap:8px}
-  button{background:#222;color:#fff;padding:8px 10px;border-radius:6px;cursor:pointer;border:1px solid #333}
-  .viewer{position:fixed;inset:0;display:block;overflow:hidden;background:#000}
-  .strip{height:100%;display:flex;align-items:stretch;box-sizing:border-box}
-  .slot{flex:0 0 50vw;display:flex;align-items:center;justify-content:center;overflow:hidden;height:100%}
-  canvas{display:block;max-height:100vh;width:auto;height:auto;background:#fff}
+  html,body{
+    margin:0;
+    height:100%;
+    background:#000;
+    overflow:hidden;
+  }
+  .controls{
+    position:fixed;
+    top:12px;
+    left:12px;
+    z-index:60;
+    display:flex;
+    gap:8px;
+  }
+  button{
+    background:#222;
+    color:#fff;
+    padding:8px 10px;
+    border-radius:6px;
+    cursor:pointer;
+    border:1px solid #333;
+  }
+  .viewer{
+    position:fixed;
+    inset:0;
+    display:block;
+    overflow:hidden;
+    background:#000;
+  }
+  .strip{
+    height:100%;
+    display:flex;
+    align-items:stretch;
+    box-sizing:border-box;
+  }
+  .slot{
+    flex:0 0 50vw;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    overflow:hidden;
+    height:100%;
+  }
+  canvas{
+    display:block;
+    background:#fff;
+    max-height:100vh;
+    max-width:50vw;
+    width:auto;
+    height:100%;
+    object-fit:contain;
+  }
 </style>
 </head>
 <body>
@@ -37,7 +80,6 @@ const chooseBtn = document.getElementById('chooseBtn');
 const fileInput = document.getElementById('fileInput');
 const fullscreenBtn = document.getElementById('fullscreenBtn');
 const controls = document.getElementById('controls');
-
 const viewer = document.getElementById('viewer');
 const strip = document.getElementById('strip');
 
@@ -47,40 +89,9 @@ let slotWidth = window.innerWidth / 2;
 let leftIndex = 1;
 let animating = false;
 let animationHandle = null;
-const TRANSITION_MS = 12000; // 12 secondi
 
-
-/* -----------------------------------------------------------
-   🔥 HIDPI CAST BOOST
-   Rileva automaticamente quando l'output è su uno schermo enorme
------------------------------------------------------------- */
-
-function computeQualityScale() {
-  const w = window.screen.width;
-  const h = window.screen.height;
-  const dpr = window.devicePixelRatio || 1;
-
-  // Risoluzione reale in pixel
-  const totalPixels = w * h * dpr * dpr;
-
-  // Soglia per capire se siamo su uno schermo tipo TV 4K
-  const isLargeDisplay = totalPixels > 4_000_000; // > ~FullHD
-
-  if (isLargeDisplay) {
-    // Massima qualità: super nitida su TV
-    return 4.0;
-  } else {
-    // Telefono o laptop
-    return Math.min(3, Math.max(1.5, dpr * 1.5));
-  }
-}
-
-let QUALITY_SCALE = computeQualityScale();
-
-
-/* -----------------------------------------------------------
-   Rendering pagine
------------------------------------------------------------- */
+const TRANSITION_MS = 12000; 
+const QUALITY_SCALE = Math.min(5, Math.max(2, window.devicePixelRatio * 2));
 
 function createSlotElement() {
   const s = document.createElement('div');
@@ -88,43 +99,35 @@ function createSlotElement() {
   return s;
 }
 
+/* -------------- RENDER PAGE MIGLIORATO (pagina intera, non zoomata!) ---------------- */
+
 async function renderPageCanvas(pageNum) {
   const page = await pdfDoc.getPage(pageNum);
-  const viewport = page.getViewport({ scale: 1 });
-
-  // Risoluzione target basata sul nuovo QUALITY_SCALE
-  const targetWidth = viewport.width * QUALITY_SCALE;
-  const targetHeight = viewport.height * QUALITY_SCALE;
-
-  const ratio = viewport.width / viewport.height;
-
-  let finalWidth = targetWidth;
-  let finalHeight = finalWidth / ratio;
-
-  if (finalHeight > targetHeight) {
-    finalHeight = targetHeight;
-    finalWidth = finalHeight * ratio;
-  }
-
-  const scale = finalWidth / viewport.width;
-  const scaled = page.getViewport({ scale });
+  const viewport = page.getViewport({ scale: QUALITY_SCALE });
 
   const canvas = document.createElement('canvas');
-  canvas.style.width = scaled.width / window.devicePixelRatio + "px";
-  canvas.style.height = scaled.height / window.devicePixelRatio + "px";
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
 
-  canvas.width = Math.round(scaled.width);
-  canvas.height = Math.round(scaled.height);
+  // Mostra la pagina intera senza zoom ritagliato
+  canvas.style.width = "auto";
+  canvas.style.height = "100%";
+  canvas.style.maxHeight = "100vh";
+  canvas.style.maxWidth = "50vw";
+  canvas.style.objectFit = "contain";
 
   const ctx = canvas.getContext('2d');
-  await page.render({ canvasContext: ctx, viewport: scaled }).promise;
+  await page.render({ canvasContext: ctx, viewport }).promise;
 
   return canvas;
 }
 
+/* --------------------------------------------------------------------------- */
+
 async function buildAllSlots() {
   strip.innerHTML = '';
   slotWidth = Math.round(window.innerWidth / 2);
+
   strip.appendChild(createSlotElement()); // dummy start
 
   for (let p = 1; p <= numPages; p++) {
@@ -137,22 +140,22 @@ async function buildAllSlots() {
   strip.appendChild(createSlotElement()); // dummy end
 }
 
-
-/* -----------------------------------------------------------
-   Scorrimento pagine
------------------------------------------------------------- */
-
 function animateScrollTo(targetScroll, durationMs = TRANSITION_MS) {
   if (animationHandle) cancelAnimationFrame(animationHandle);
+
   const start = performance.now();
   const from = viewer.scrollLeft;
   const delta = targetScroll - from;
 
   function step(now) {
     const t = Math.min(1, (now - start) / durationMs);
-    viewer.scrollLeft = from + delta * t;
-    if (t < 1) animationHandle = requestAnimationFrame(step);
-    else animating = false;
+    viewer.scrollLeft = from + delta * t; // lineare
+
+    if (t < 1) {
+      animationHandle = requestAnimationFrame(step);
+    } else {
+      animating = false;
+    }
   }
 
   animating = true;
@@ -181,17 +184,13 @@ function onKey(e) {
   if (!pdfDoc) return;
   if (e.key === 'ArrowRight') scrollNext();
   else if (e.key === 'ArrowLeft') scrollPrev();
-  else if (e.key === 'Escape' && document.fullscreenElement) document.exitFullscreen();
+  else if (e.key === 'Escape' && document.fullscreenElement)
+    document.exitFullscreen();
 }
 
-
-/* -----------------------------------------------------------
-   Caricamento PDF
------------------------------------------------------------- */
-
-chooseBtn.addEventListener('click', () => { 
-  fileInput.value = ''; 
-  fileInput.click(); 
+chooseBtn.addEventListener('click', () => {
+  fileInput.value = '';
+  fileInput.click();
 });
 
 fileInput.addEventListener('change', async (ev) => {
@@ -199,40 +198,32 @@ fileInput.addEventListener('change', async (ev) => {
   if (!f) return;
 
   try {
-    const buffer = await f.arrayBuffer();
-    pdfDoc = await pdfjsLib.getDocument({ data: buffer }).promise;
+    const arrayBuffer = await f.arrayBuffer();
+    pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
 
     numPages = pdfDoc.numPages;
-    QUALITY_SCALE = computeQualityScale(); // 🔥 Ricalcolo qualità al volo
     await buildAllSlots();
 
     leftIndex = 1;
     viewer.scrollLeft = leftIndex * slotWidth;
-    fullscreenBtn.disabled = false;
 
+    fullscreenBtn.disabled = false;
   } catch (err) {
-    console.error('Errore caricamento PDF', err);
+    console.error('Errore PDF', err);
     alert('Errore nel caricamento del PDF');
   }
 });
 
-
-/* -----------------------------------------------------------
-   Fullscreen
------------------------------------------------------------- */
-
 fullscreenBtn.addEventListener('click', async () => {
   try {
-    const docEl = document.documentElement;
-    await (docEl.requestFullscreen || docEl.webkitRequestFullscreen).call(docEl);
+    await document.documentElement.requestFullscreen();
   } catch (err) {
-    console.warn('Impossibile entrare in fullscreen', err);
-    return;
+    console.warn('Fullscreen fallito', err);
   }
 
   controls.style.display = 'none';
-  viewer.tabIndex = -1;
   viewer.focus();
+
   window.addEventListener('keydown', onKey);
 });
 
@@ -243,29 +234,16 @@ document.addEventListener('fullscreenchange', () => {
   }
 });
 
-
-/* -----------------------------------------------------------
-   Resize
------------------------------------------------------------- */
-
 window.addEventListener('resize', async () => {
   if (!pdfDoc) return;
   if (animationHandle) cancelAnimationFrame(animationHandle);
-  animating = false;
 
-  QUALITY_SCALE = computeQualityScale(); // 🔥 Si adatta alla nuova risoluzione
+  animating = false;
   slotWidth = Math.round(window.innerWidth / 2);
 
   await buildAllSlots();
   viewer.scrollLeft = leftIndex * slotWidth;
 });
 </script>
-
-<script>
-if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("service-worker.js");
-}
-</script>
-
 </body>
 </html>
