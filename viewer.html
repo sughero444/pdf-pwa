@@ -3,65 +3,20 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>PDF Two-Page Viewer — Ultra Sharp Casting</title>
+<title>PDF Two-Page Viewer — scorrimento costante</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#000000">
 
 <style>
-  html,body{
-    margin:0;
-    height:100%;
-    background:#000;
-    overflow:hidden;
-  }
-
-  .controls{
-    position:fixed;
-    top:12px;
-    left:12px;
-    z-index:60;
-    display:flex;
-    gap:8px;
-  }
-
-  button{
-    background:#222;
-    color:#fff;
-    padding:8px 10px;
-    border-radius:6px;
-    cursor:pointer;
-    border:1px solid #333;
-  }
-
-  .viewer{
-    position:fixed;
-    inset:0;
-    display:block;
-    overflow:hidden;
-    background:#000;
-  }
-
-  .strip{
-    height:100%;
-    display:flex;
-    align-items:stretch;
-    box-sizing:border-box;
-  }
-
-  .slot{
-    flex:0 0 50vw;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    overflow:hidden;
-    height:100%;
-  }
-
-  canvas{
-    display:block;
-    background:#fff;
-  }
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  .controls{position:fixed;top:12px;left:12px;z-index:60;display:flex;gap:8px}
+  button{background:#222;color:#fff;padding:8px 10px;border-radius:6px;cursor:pointer;border:1px solid #333}
+  .viewer{position:fixed;inset:0;display:block;overflow:hidden;background:#000}
+  .strip{height:100%;display:flex;align-items:stretch;box-sizing:border-box}
+  .slot{flex:0 0 50vw;display:flex;align-items:center;justify-content:center;overflow:hidden;height:100%}
+  canvas{display:block;max-height:100vh;width:auto;height:auto;background:#fff}
 </style>
 </head>
-
 <body>
 
 <div class="controls" id="controls">
@@ -75,16 +30,9 @@
 </div>
 
 <script src="pdf.js"></script>
-
 <script>
-// ------------------------------------------------------
-// PDF.js worker
-// ------------------------------------------------------
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.js';
 
-// ------------------------------------------------------
-// UI DOM
-// ------------------------------------------------------
 const chooseBtn = document.getElementById('chooseBtn');
 const fileInput = document.getElementById('fileInput');
 const fullscreenBtn = document.getElementById('fullscreenBtn');
@@ -93,47 +41,59 @@ const controls = document.getElementById('controls');
 const viewer = document.getElementById('viewer');
 const strip = document.getElementById('strip');
 
-// ------------------------------------------------------
-// Stato
-// ------------------------------------------------------
 let pdfDoc = null;
 let numPages = 0;
 let slotWidth = window.innerWidth / 2;
 let leftIndex = 1;
-let totalSlots = 0;
-
 let animating = false;
 let animationHandle = null;
-
-const TRANSITION_MS = 12000;
-
-// ------------------------------------------------------
-// 🔥 QUALITÀ MASSIMA PER CASTING
-// ------------------------------------------------------
-// devicePixelRatio * 4 = altissima qualità
-// limite 8x per sicurezza
-const QUALITY_SCALE = Math.min(8, window.devicePixelRatio * 4);
+const TRANSITION_MS = 12000; // 12 secondi
 
 
-// ------------------------------------------------------
-// Utility slot
-// ------------------------------------------------------
-function createSlotElement(){
+/* -----------------------------------------------------------
+   🔥 HIDPI CAST BOOST
+   Rileva automaticamente quando l'output è su uno schermo enorme
+------------------------------------------------------------ */
+
+function computeQualityScale() {
+  const w = window.screen.width;
+  const h = window.screen.height;
+  const dpr = window.devicePixelRatio || 1;
+
+  // Risoluzione reale in pixel
+  const totalPixels = w * h * dpr * dpr;
+
+  // Soglia per capire se siamo su uno schermo tipo TV 4K
+  const isLargeDisplay = totalPixels > 4_000_000; // > ~FullHD
+
+  if (isLargeDisplay) {
+    // Massima qualità: super nitida su TV
+    return 4.0;
+  } else {
+    // Telefono o laptop
+    return Math.min(3, Math.max(1.5, dpr * 1.5));
+  }
+}
+
+let QUALITY_SCALE = computeQualityScale();
+
+
+/* -----------------------------------------------------------
+   Rendering pagine
+------------------------------------------------------------ */
+
+function createSlotElement() {
   const s = document.createElement('div');
   s.className = 'slot';
   return s;
 }
 
-
-// ------------------------------------------------------
-// RENDER PDF PAGE in ULTRA-HD
-// ------------------------------------------------------
-async function renderPageCanvas(pageNum){
+async function renderPageCanvas(pageNum) {
   const page = await pdfDoc.getPage(pageNum);
   const viewport = page.getViewport({ scale: 1 });
 
-  // Dimensioni render target
-  const targetWidth  = viewport.width  * QUALITY_SCALE;
+  // Risoluzione target basata sul nuovo QUALITY_SCALE
+  const targetWidth = viewport.width * QUALITY_SCALE;
   const targetHeight = viewport.height * QUALITY_SCALE;
 
   const ratio = viewport.width / viewport.height;
@@ -141,7 +101,7 @@ async function renderPageCanvas(pageNum){
   let finalWidth = targetWidth;
   let finalHeight = finalWidth / ratio;
 
-  if (finalHeight > targetHeight){
+  if (finalHeight > targetHeight) {
     finalHeight = targetHeight;
     finalWidth = finalHeight * ratio;
   }
@@ -149,62 +109,48 @@ async function renderPageCanvas(pageNum){
   const scale = finalWidth / viewport.width;
   const scaled = page.getViewport({ scale });
 
-  // Canvas Full Resolution
   const canvas = document.createElement('canvas');
+  canvas.style.width = scaled.width / window.devicePixelRatio + "px";
+  canvas.style.height = scaled.height / window.devicePixelRatio + "px";
+
   canvas.width = Math.round(scaled.width);
   canvas.height = Math.round(scaled.height);
 
-  // IMPORTANTE: nessuno scaling CSS → nitidezza massima
-  canvas.style.width = scaled.width + "px";
-  canvas.style.height = "auto";
-
-  const ctx = canvas.getContext('2d', { alpha:false });
-
-  await page.render({
-    canvasContext: ctx,
-    viewport: scaled
-  }).promise;
+  const ctx = canvas.getContext('2d');
+  await page.render({ canvasContext: ctx, viewport: scaled }).promise;
 
   return canvas;
 }
 
-
-// ------------------------------------------------------
-// Build strip
-// ------------------------------------------------------
-async function buildAllSlots(){
+async function buildAllSlots() {
   strip.innerHTML = '';
   slotWidth = Math.round(window.innerWidth / 2);
+  strip.appendChild(createSlotElement()); // dummy start
 
-  // Dummy left
-  strip.appendChild(createSlotElement());
-
-  for (let p = 1; p <= numPages; p++){
+  for (let p = 1; p <= numPages; p++) {
     const slot = createSlotElement();
     const canvas = await renderPageCanvas(p);
     slot.appendChild(canvas);
     strip.appendChild(slot);
   }
 
-  // Dummy right
-  strip.appendChild(createSlotElement());
-  totalSlots = numPages + 2;
+  strip.appendChild(createSlotElement()); // dummy end
 }
 
 
-// ------------------------------------------------------
-// Animazione avanti (destra)
-// ------------------------------------------------------
-function animateScrollTo(targetScroll, durationMs = TRANSITION_MS){
-  if (animationHandle) cancelAnimationFrame(animationHandle);
+/* -----------------------------------------------------------
+   Scorrimento pagine
+------------------------------------------------------------ */
 
+function animateScrollTo(targetScroll, durationMs = TRANSITION_MS) {
+  if (animationHandle) cancelAnimationFrame(animationHandle);
   const start = performance.now();
-  const from  = viewer.scrollLeft;
+  const from = viewer.scrollLeft;
   const delta = targetScroll - from;
 
-  function step(now){
+  function step(now) {
     const t = Math.min(1, (now - start) / durationMs);
-    viewer.scrollLeft = from + delta * t; // linea retta
+    viewer.scrollLeft = from + delta * t;
     if (t < 1) animationHandle = requestAnimationFrame(step);
     else animating = false;
   }
@@ -213,80 +159,74 @@ function animateScrollTo(targetScroll, durationMs = TRANSITION_MS){
   animationHandle = requestAnimationFrame(step);
 }
 
-
-// ------------------------------------------------------
-// Scorrimenti
-// ------------------------------------------------------
-function scrollToLeftIndexInstant(index){
-  const i = Math.max(1, Math.min(index, numPages));
-  viewer.scrollLeft = i * slotWidth;
-  leftIndex = i;
+function scrollToLeftIndexInstant(index) {
+  const slotIndex = Math.max(1, Math.min(index, numPages));
+  viewer.scrollLeft = slotIndex * slotWidth;
+  leftIndex = slotIndex;
 }
 
-function scrollNext(){
+function scrollNext() {
   if (animating || leftIndex >= numPages) return;
   const newIndex = leftIndex + 1;
   animateScrollTo(newIndex * slotWidth, TRANSITION_MS);
   leftIndex = newIndex;
 }
 
-function scrollPrev(){
+function scrollPrev() {
   if (animating || leftIndex <= 1) return;
   scrollToLeftIndexInstant(leftIndex - 1);
 }
 
-
-// ------------------------------------------------------
-// Tastiera
-// ------------------------------------------------------
-function onKey(e){
+function onKey(e) {
   if (!pdfDoc) return;
   if (e.key === 'ArrowRight') scrollNext();
   else if (e.key === 'ArrowLeft') scrollPrev();
-  else if (e.key === 'Escape' && document.fullscreenElement)
-    document.exitFullscreen();
+  else if (e.key === 'Escape' && document.fullscreenElement) document.exitFullscreen();
 }
 
 
-// ------------------------------------------------------
-// File Input
-// ------------------------------------------------------
-chooseBtn.addEventListener('click', () => {
-  fileInput.value = '';
-  fileInput.click();
+/* -----------------------------------------------------------
+   Caricamento PDF
+------------------------------------------------------------ */
+
+chooseBtn.addEventListener('click', () => { 
+  fileInput.value = ''; 
+  fileInput.click(); 
 });
 
-fileInput.addEventListener('change', async ev => {
-  const file = ev.target.files && ev.target.files[0];
-  if (!file) return;
+fileInput.addEventListener('change', async (ev) => {
+  const f = ev.target.files && ev.target.files[0];
+  if (!f) return;
 
-  try{
-    const arrayBuffer = await file.arrayBuffer();
-    pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  try {
+    const buffer = await f.arrayBuffer();
+    pdfDoc = await pdfjsLib.getDocument({ data: buffer }).promise;
+
     numPages = pdfDoc.numPages;
-
+    QUALITY_SCALE = computeQualityScale(); // 🔥 Ricalcolo qualità al volo
     await buildAllSlots();
-    leftIndex = 1;
-    viewer.scrollLeft = slotWidth;
 
+    leftIndex = 1;
+    viewer.scrollLeft = leftIndex * slotWidth;
     fullscreenBtn.disabled = false;
-  } catch (e){
-    console.error(e);
-    alert("Errore nel caricamento del PDF");
+
+  } catch (err) {
+    console.error('Errore caricamento PDF', err);
+    alert('Errore nel caricamento del PDF');
   }
 });
 
 
-// ------------------------------------------------------
-// Fullscreen
-// ------------------------------------------------------
+/* -----------------------------------------------------------
+   Fullscreen
+------------------------------------------------------------ */
+
 fullscreenBtn.addEventListener('click', async () => {
-  try{
-    const el = document.documentElement;
-    if (el.requestFullscreen) await el.requestFullscreen();
-    else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
-  }catch(e){
-    console.warn("Fullscreen non disponibile", e);
+  try {
+    const docEl = document.documentElement;
+    await (docEl.requestFullscreen || docEl.webkitRequestFullscreen).call(docEl);
+  } catch (err) {
+    console.warn('Impossibile entrare in fullscreen', err);
     return;
   }
 
@@ -297,27 +237,34 @@ fullscreenBtn.addEventListener('click', async () => {
 });
 
 document.addEventListener('fullscreenchange', () => {
-  if (!document.fullscreenElement){
-    controls.style.display = 'flex';
+  if (!document.fullscreenElement) {
     window.removeEventListener('keydown', onKey);
+    controls.style.display = 'flex';
   }
 });
 
 
-// ------------------------------------------------------
-// Resize window → ricostruzione completa
-// ------------------------------------------------------
+/* -----------------------------------------------------------
+   Resize
+------------------------------------------------------------ */
+
 window.addEventListener('resize', async () => {
   if (!pdfDoc) return;
-
   if (animationHandle) cancelAnimationFrame(animationHandle);
   animating = false;
 
+  QUALITY_SCALE = computeQualityScale(); // 🔥 Si adatta alla nuova risoluzione
   slotWidth = Math.round(window.innerWidth / 2);
-  await buildAllSlots();
 
+  await buildAllSlots();
   viewer.scrollLeft = leftIndex * slotWidth;
 });
+</script>
+
+<script>
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("service-worker.js");
+}
 </script>
 
 </body>
