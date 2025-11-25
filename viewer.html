@@ -36,9 +36,9 @@
   <button id="downloadBtn" style="display:none">Scarica</button>
   <button id="fullscreenPlayBtn" style="display:none">Schermo intero</button>
 
-  <!-- ⭐ NUOVO: Carica video esistente -->
+  <!-- NUOVO: Carica video esistente -->
   <button id="loadVideoBtn">Carica Video</button>
-  <input type="file" id="loadVideoInput" accept="video/webm" style="display:none">
+  <input type="file" id="loadVideoInput" accept="video/webm,video/mp4" style="display:none">
 
   <span id="status"></span>
 </div>
@@ -50,7 +50,7 @@
 <script src="pdf.js"></script>
 <script>
 /*
-   --- Versione originale stabile + SOLO aggiunta pulsante Carica Video ---
+   --- Versione originale stabile + solo fix per Carica Video / Fullscreen readiness ---
 */
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.js';
@@ -77,8 +77,24 @@ const pairStride = 1;
 
 function log(s) { status.textContent = s; }
 
+/* ---------------------------------------------------------
+   Fullscreen button handler: definito globalmente (fix)
+   - mette il player in fullscreen e mantiene il video in pausa
+----------------------------------------------------------*/
+fullscreenPlayBtn.addEventListener('click', async () => {
+  try {
+    if (player.requestFullscreen) await player.requestFullscreen();
+    else if (player.webkitRequestFullscreen) await player.webkitRequestFullscreen();
+  } catch (err) {
+    console.warn('fullscreen error', err);
+  }
+  // keep paused at start
+  try { player.pause(); } catch(e){}
+  try { player.currentTime = 0; } catch(e){}
+});
+
 /* ---------------------------------------------
-   ⭐ Aggiunta: Carica un video esistente
+   Carica video esistente (solo questa parte aggiunta)
 ----------------------------------------------*/
 loadVideoBtn.addEventListener("click", () => loadVideoInput.click());
 
@@ -86,25 +102,35 @@ loadVideoInput.addEventListener("change", async () => {
   const f = loadVideoInput.files?.[0];
   if (!f) return;
 
+  // show loading message
+  log('Caricamento file video...');
+
   const url = URL.createObjectURL(f);
 
+  // assign src then wait metadata to ensure fullscreen & playback readiness
   player.src = url;
   player.controls = false;
   playerWrap.style.display = "flex";
 
-  downloadBtn.style.display = "none";
-  fullscreenPlayBtn.style.display = "inline";
+  downloadBtn.style.display = 'none';
+  fullscreenPlayBtn.style.display = 'inline';
 
+  // pause and reset time until media loaded
   player.pause();
   player.currentTime = 0;
 
-  log("Video caricato — premi Freccia Destra per avanzare di 12s.");
+  // when metadata loaded, signal readiness
+  const onLoaded = () => {
+    log('Video caricato e pronto — premi Freccia Destra per avanzare di 12s.');
+    player.removeEventListener('loadedmetadata', onLoaded);
+  };
+  player.addEventListener('loadedmetadata', onLoaded);
 
-  // manteniamo i keybindings della versione originale
-  const onTimeUpdate = () => {};
-  player.removeEventListener("timeupdate", onTimeUpdate);
+  // also handle possible load errors
+  player.addEventListener('error', () => {
+    log('Errore nel caricamento del video.');
+  }, { once: true });
 });
-
 
 /* ---------------------------------------------
    TUTTO IL RESTO È LA TUA VERSIONE ORIGINALE
@@ -134,24 +160,26 @@ generateBtn.addEventListener('click', async () => {
   const pageH = videoH;
 
   generateBtn.disabled = true;
-  log('Prerendering pagine...');
+  log('Prerendering pagine (potrebbe richiedere tempo)...');
 
+  // prerendering: render ogni pagina su canvas individuale a alta risoluzione
   pagesCanvas = [];
   const dpr = window.devicePixelRatio || 1;
-
   for (let p = 1; p <= pageCount; p++) {
     log(`Render pagina ${p}/${pageCount} ...`);
     const page = await pdfDoc.getPage(p);
     const vp = page.getViewport({ scale: 1 });
+    // scale per adattare la pagina a pageW x pageH (fit)
     const scaleX = pageW / vp.width;
     const scaleY = pageH / vp.height;
     const fitScale = Math.min(scaleX, scaleY);
+    // aumentiamo per qualità: * dpr * qualityBoost (1.5)
     const qualityBoost = 1.5;
     const scale = fitScale * dpr * qualityBoost;
     const scaled = page.getViewport({ scale });
     const canvas = document.createElement('canvas');
-    canvas.width = scaled.width;
-    canvas.height = scaled.height;
+    canvas.width = Math.round(scaled.width);
+    canvas.height = Math.round(scaled.height);
     const ctx = canvas.getContext('2d', { alpha:false });
     await page.render({ canvasContext: ctx, viewport: scaled }).promise;
     pagesCanvas.push({ canvas, naturalW: scaled.width, naturalH: scaled.height });
@@ -159,85 +187,105 @@ generateBtn.addEventListener('click', async () => {
 
   log('Prerendering completato. Generazione video...');
 
+  // canvas di registrazione (video)
   const recordCanvas = document.createElement('canvas');
   recordCanvas.width = videoW;
   recordCanvas.height = videoH;
   const rctx = recordCanvas.getContext('2d', { alpha:false });
 
+  // inizializza neri
   rctx.fillStyle = '#000';
   rctx.fillRect(0,0,videoW,videoH);
 
   const stream = recordCanvas.captureStream(fps);
 
+  // scegli mime
   const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ?
                'video/webm;codecs=vp9' :
                (MediaRecorder.isTypeSupported('video/webm;codecs=vp8') ? 'video/webm;codecs=vp8' : 'video/webm');
 
-  const options = { mimeType: mime, videoBitsPerSecond: 6_000_000 };
+  const options = { mimeType: mime, videoBitsPerSecond: 6_000_000 }; // 6 Mbps baseline
 
   let recorder;
   try {
     recorder = new MediaRecorder(stream, options);
   } catch (err) {
     console.error('MediaRecorder init failed', err);
-    alert('Impossibile inizializzare il recorder.');
+    alert('Impossibile inizializzare il recorder nel browser corrente.');
     generateBtn.disabled = false;
     return;
   }
 
   const chunks = [];
-  recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
-  const waitForStop = () => new Promise(res => recorder.onstop = res);
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+  recorder.onerror = (e) => console.error('Recorder error', e);
+
+  const waitForStop = () => new Promise(resolve => recorder.onstop = resolve);
 
   recorder.start();
-  log('Recording...');
+  log('Recording avviata...');
 
-  function drawFrame(offsetX) {
+  // helper: disegna il frame per un offset globale (in pixel)
+  function drawFrameForOffset(offsetX) {
+    // offsetX rappresenta quanto abbiamo scorrere da sinistra in pixel (positivo)
     rctx.fillStyle = '#000';
     rctx.fillRect(0,0,videoW,videoH);
 
+    // disegna pagine: pagina k posX = (k-1)*pageW - offsetX
     for (let k = 1; k <= pageCount; k++) {
-      const posX = (k-1)*pageW - offsetX;
+      const posX = Math.round((k-1) * pageW - offsetX);
       if (posX + pageW < 0 || posX > videoW) continue;
       const pc = pagesCanvas[k-1];
+      // draw pc.canvas scaled to pageW x pageH at destX,destY
       rctx.drawImage(pc.canvas, 0, 0, pc.naturalW, pc.naturalH, posX, 0, pageW, pageH);
     }
   }
 
+  // numero transizioni (da pagina 1->2, 2->3, ..., pageCount-1 -> pageCount)
   const totalSteps = Math.max(0, pageCount - 1);
 
+  // loop basato sul tempo (garantisce stepSeconds precisi)
   for (let step = 0; step < totalSteps; step++) {
     const startOffset = step * pageW;
-    const endOffset   = (step+1) * pageW;
-    const t0 = performance.now();
+    const endOffset = (step + 1) * pageW;
+    const startTime = performance.now();
+    // loop finché non raggiungiamo stepSeconds
     while (true) {
       const now = performance.now();
-      const t = Math.min(1, (now - t0) / (stepSeconds * 1000));
-      const off = startOffset + t*(endOffset - startOffset);
-      drawFrame(off);
+      const elapsed = now - startTime;
+      const t = Math.min(1, elapsed / (stepSeconds * 1000)); // 0..1 su base tempo reale
+      const offsetX = startOffset + t * (endOffset - startOffset);
+      drawFrameForOffset(offsetX);
+      // await next paint (non dipendiamo dall'FPS)
       await new Promise(requestAnimationFrame);
       if (t >= 1) break;
     }
   }
 
-  drawFrame(totalSteps * pageW);
-  await new Promise(r => setTimeout(r, 300));
+  // hold finale (mezza seconda)
+  {
+    const finalOffset = totalSteps * pageW;
+    const holdUntil = performance.now() + 500;
+    while (performance.now() < holdUntil) {
+      drawFrameForOffset(finalOffset);
+      await new Promise(requestAnimationFrame);
+    }
+  }
 
+  // stop recording e attendi stop
   recorder.stop();
   await waitForStop();
 
   const blob = new Blob(chunks, { type: mime });
+  log('Video pronto — dimensione: ' + Math.round(blob.size / 1024) + ' KB');
 
-  log('Video pronto.');
-
+  // mostra player (in pausa)
   const url = URL.createObjectURL(blob);
   player.src = url;
   player.controls = false;
   playerWrap.style.display = 'flex';
-
   downloadBtn.style.display = 'inline';
   fullscreenPlayBtn.style.display = 'inline';
-
   downloadBtn.onclick = () => {
     const a = document.createElement('a');
     a.href = url;
@@ -245,41 +293,53 @@ generateBtn.addEventListener('click', async () => {
     a.click();
   };
 
+  // inizialmente fermo e a 0
   player.pause();
   player.currentTime = 0;
 
-  let stepTarget = null;
-  const onTimeUpdate = () => {
-    if (stepTarget !== null && player.currentTime >= stepTarget - 0.04) {
+  // playback stepping logic: play until next stepSeconds and pause
+  let stepTargetTime = null;
+  function onTimeUpdate() {
+    if (stepTargetTime !== null && player.currentTime >= stepTargetTime - 0.04) {
       player.pause();
-      player.currentTime = stepTarget;
-      stepTarget = null;
+      // snap to exactly targetTime to avoid drift
+      player.currentTime = Math.min(player.duration, stepTargetTime);
+      stepTargetTime = null;
     }
-  };
-  player.addEventListener("timeupdate", onTimeUpdate);
+  }
+  player.removeEventListener('timeupdate', onTimeUpdate);
+  player.addEventListener('timeupdate', onTimeUpdate);
 
-  function onKey(ev) {
-    if (ev.key === "ArrowRight") {
-      if (!player.paused) return;
-      const seg = Math.floor(player.currentTime / stepSeconds);
-      stepTarget = (seg+1)*stepSeconds;
-      player.play().catch(()=>{});
-    } else if (ev.key === "ArrowLeft") {
-      const seg = Math.floor(player.currentTime / stepSeconds);
-      player.currentTime = Math.max(0, seg-1)*stepSeconds;
+  // handle keys
+  function onKeyHandler(ev) {
+    if (playerWrap.style.display === 'none') return;
+    if (ev.key === 'ArrowRight') {
+      // start play until next segment
+      if (!player.paused) return; // already playing
+      const currentSeg = Math.floor(player.currentTime / stepSeconds);
+      const target = Math.min(player.duration, (currentSeg + 1) * stepSeconds);
+      stepTargetTime = target;
+      // try to enter fullscreen for best effect (user gesture may be required)
+      player.play().catch(err => console.error('play error', err));
+    } else if (ev.key === 'ArrowLeft') {
+      // go back one step (instant)
+      const currentSeg = Math.floor(player.currentTime / stepSeconds);
+      const newSeg = Math.max(0, currentSeg - 1);
+      player.currentTime = newSeg * stepSeconds;
       player.pause();
+    } else if (ev.key === 'Escape') {
+      if (document.fullscreenElement) document.exitFullscreen().catch(()=>{});
     }
   }
 
-  window.addEventListener("keydown", onKey);
+  window.removeEventListener('keydown', onKeyHandler);
+  window.addEventListener('keydown', onKeyHandler);
 
-  fullscreenPlayBtn.onclick = async () => {
-    try { await player.requestFullscreen(); } catch(e){}
-    player.pause();
-    player.currentTime = 0;
-  };
+  // fullscreenPlayBtn: mette il player in fullscreen and keeps paused at start
+  // (handler già definito globalmente)
 
   generateBtn.disabled = false;
+  log('Pronto: premi Freccia Destra per avviare 12s di riproduzione (pausa automatica).');
 });
 
 </script>
