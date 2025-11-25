@@ -1,192 +1,349 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="it">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>PDF → Video Viewer</title>
-
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>PDF → Video (Two-page scroll)</title>
 <style>
-    body {
-        margin: 0;
-        background: #000;
-        color: white;
-        font-family: sans-serif;
-        text-align: center;
-        user-select: none;
-    }
+  html,body{margin:0;height:100%;background:#000;color:#fff;font-family:system-ui,Arial}
+  .controls{position:fixed;top:10px;left:10px;z-index:999;display:flex;gap:8px;align-items:center;padding:8px}
+  button,input,select{padding:8px;border-radius:6px;border:0;background:#222;color:#fff;cursor:pointer}
 
-    #videoElement {
-        width: 100vw;
-        height: 100vh;
-        object-fit: contain;
-        background: black;
-    }
+  /* 🔹 Aggiunto sfondo per rendere visibili i messaggi anche su video chiari */
+  #status{
+    margin-left:8px;
+    font-size:14px;
+    background:rgba(0,0,0,0.6);
+    padding:4px 8px;
+    border-radius:6px;
+  }
 
-    #controls {
-        padding: 10px;
-        background: rgba(0,0,0,0.4);
-        position: fixed;
-        top: 0;
-        width: 100%;
-        z-index: 10;
-    }
+  #videoWrap{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#000}
+  video{max-width:100%;max-height:100%;background:#000;outline:none}
 
-    #messageLabel {
-        position: fixed;
-        bottom: 20px;
-        left: 50%;
-        transform: translateX(-50%);
-        padding: 10px 20px;
-        background: rgba(0,0,0,0.6);
-        color: white;
-        border-radius: 8px;
-        font-size: 18px;
-        z-index: 20;
-        display: none;
-    }
-
-    button, select {
-        padding: 8px 14px;
-        margin: 5px;
-        font-size: 16px;
-    }
+  /* Rimuove overlay dei controlli in pausa su alcuni browser */
+  video::-webkit-media-controls { display:none !important; }
 </style>
 </head>
 <body>
 
-<div id="controls">
-    <input type="file" id="pdfInput" accept="application/pdf" />
-    <select id="resolutionSelect">
-        <option value="1280x720">1280×720 (HD)</option>
-        <option value="1920x1080" selected>1920×1080 (Full HD)</option>
-        <option value="2560x1440">2560×1440 (2K)</option>
-        <option value="3840x2160">3840×2160 (4K)</option>
+<div class="controls">
+  <input id="fileInput" type="file" accept="application/pdf">
+  <label style="display:flex;gap:6px;align-items:center;color:#ddd">
+    Ris:
+    <select id="resolution">
+      <option value="1280x720">1280×720</option>
+      <option value="1920x1080" selected>1920×1080</option>
+      <option value="3840x2160">3840×2160 (heavy)</option>
     </select>
-    <button id="generateButton">Genera Video</button>
+  </label>
+  <label style="color:#ddd">FPS:
+    <select id="fps"><option>24</option><option>25</option><option selected>30</option></select>
+  </label>
 
-    <input type="file" id="videoInput" accept="video/mp4" style="margin-left:20px" />
+  <button id="generateBtn">Genera Video</button>
+  <button id="loadVideoBtn">Carica Video</button>
+  <input id="videoInput" type="file" accept="video/*" style="display:none">
+
+  <button id="downloadBtn" style="display:none">Scarica</button>
+  <button id="fullscreenPlayBtn" style="display:none">Schermo intero</button>
+
+  <span id="status"></span>
 </div>
 
-<video id="videoElement"></video>
+<div id="videoWrap">
+  <video id="player" playsinline></video>
+</div>
 
-<div id="messageLabel"></div>
-
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
-
+<script src="pdf.js"></script>
 <script>
-let videoElement = document.getElementById("videoElement");
-let messageLabel = document.getElementById("messageLabel");
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.js';
 
-let videoBlob = null;
-let videoReady = false;   // ⭐ NUOVA VARIABILE
+const fileInput = document.getElementById('fileInput');
+const videoInput = document.getElementById('videoInput');
+const loadVideoBtn = document.getElementById('loadVideoBtn');
+const generateBtn = document.getElementById('generateBtn');
+const downloadBtn = document.getElementById('downloadBtn');
+const fullscreenPlayBtn = document.getElementById('fullscreenPlayBtn');
+const status = document.getElementById('status');
+const playerWrap = document.getElementById('videoWrap');
+const player = document.getElementById('player');
+const resSelect = document.getElementById('resolution');
+const fpsSelect = document.getElementById('fps');
 
-function showMessage(msg) {
-    messageLabel.innerText = msg;
-    messageLabel.style.display = "block";
-    setTimeout(() => {
-        messageLabel.style.display = "none";
-    }, 2500);
-}
+let pdfDoc = null;
+let pagesCanvas = [];
+let pageCount = 0;
 
-document.getElementById("videoInput").addEventListener("change", function (e) {
-    const file = e.target.files[0];
-    if (!file) return;
+const stepSeconds = 12;
+const pairStride = 1;
 
-    const url = URL.createObjectURL(file);
-    videoElement.src = url;
-    videoElement.pause();
+function log(s){ status.textContent = s; }
 
-    videoBlob = null;
-    videoReady = true;   // ⭐ INDICA CHE IL VIDEO È PRONTO A PARTIRE
-
-    showMessage("Video caricato!");
+/* ---- Carica PDF ---- */
+fileInput.addEventListener('change', async e=>{
+  const f = e.target.files[0];
+  if(!f) return;
+  log('Caricamento PDF...');
+  try{
+    const buf = await f.arrayBuffer();
+    pdfDoc = await pdfjsLib.getDocument({data:buf}).promise;
+    pageCount = pdfDoc.numPages;
+    log(`PDF caricato — ${pageCount} pagine`);
+  }catch(err){
+    console.error(err);
+    alert('Errore nel caricamento del PDF');
+  }
 });
 
-// —————————————————————————————————————————————
-// EVENTO FRECCIA DESTRA (PLAY)
-// —————————————————————————————————————————————
-document.addEventListener("keydown", function (e) {
-    if (e.key === "ArrowRight") {
-        if (videoReady) {
-            videoElement.play();
-        }
+/* ---- Carica VIDEO ---- */
+loadVideoBtn.addEventListener('click', ()=> videoInput.click());
+
+videoInput.addEventListener('change', e=>{
+  const f = e.target.files[0];
+  if(!f) return;
+
+  const url = URL.createObjectURL(f);
+  player.src = url;
+  player.controls = false;
+
+  playerWrap.style.display = 'flex';
+  fullscreenPlayBtn.style.display = 'inline';
+  downloadBtn.style.display = 'none';
+
+  player.pause();
+  player.currentTime = 0;
+
+  log('Video caricato — pronto per la riproduzione');
+
+  /* ---------------------------------------------------------
+     FULLSCREEN identico ai video generati
+  --------------------------------------------------------- */
+  fullscreenPlayBtn.onclick = async ()=>{
+    try{
+      if(player.requestFullscreen) await player.requestFullscreen();
+      else if(player.webkitRequestFullscreen) await player.webkitRequestFullscreen();
+    }catch(err){}
+
+    player.pause();
+    player.currentTime = 0;
+  };
+
+  /* ---------------------------------------------------------
+     🔥 AGGIUNTO: motore di avanzamento identico ai video generati
+     (Freccia Destra = avanza 12s + stop automatico)
+  --------------------------------------------------------- */
+  let stepTargetTime = null;
+
+  function onTimeUpdate(){
+    if(stepTargetTime!==null && player.currentTime >= stepTargetTime - 0.04){
+      player.pause();
+      player.currentTime = Math.min(player.duration, stepTargetTime);
+      stepTargetTime = null;
     }
+  }
+
+  player.removeEventListener('timeupdate', onTimeUpdate);
+  player.addEventListener('timeupdate', onTimeUpdate);
+
+  function onKey(ev){
+    if(playerWrap.style.display==='none') return;
+
+    if(ev.key==='ArrowRight'){
+      if(!player.paused) return;
+      const currentSeg = Math.floor(player.currentTime / stepSeconds);
+      stepTargetTime = Math.min(player.duration, (currentSeg+1)*stepSeconds);
+      player.play().catch(()=>{});
+    }
+    else if(ev.key==='ArrowLeft'){
+      const currentSeg = Math.floor(player.currentTime / stepSeconds);
+      player.currentTime = Math.max(0, (currentSeg-1)*stepSeconds);
+      player.pause();
+    }
+    else if(ev.key==='Escape'){
+      if(document.fullscreenElement) document.exitFullscreen();
+    }
+  }
+
+  window.removeEventListener('keydown', onKey);
+  window.addEventListener('keydown', onKey);
 });
 
-// —————————————————————————————————————————————
-// SCHERMO INTERO
-// —————————————————————————————————————————————
-videoElement.addEventListener("click", async () => {
-    if (videoElement.requestFullscreen) {
-        await videoElement.requestFullscreen();
-    } else if (videoElement.webkitRequestFullscreen) {
-        await videoElement.webkitRequestFullscreen();
+
+/* ---- GENERATORE VIDEO PDF ---- */
+/* (IMPORTANTE: identico alla tua versione funzionante, senza modifiche!) */
+
+generateBtn.addEventListener('click', async () => {
+  if (!pdfDoc) { alert('Seleziona prima un PDF'); return; }
+
+  const [videoW, videoH] = resSelect.value.split('x').map(Number);
+  const fps = Number(fpsSelect.value);
+  const pageW = Math.round(videoW / 2);
+  const pageH = videoH;
+
+  generateBtn.disabled = true;
+  log('Prerendering pagine (potrebbe richiedere tempo)...');
+
+  pagesCanvas = [];
+  const dpr = window.devicePixelRatio || 1;
+
+  for (let p = 1; p <= pageCount; p++) {
+    log(`Render pagina ${p}/${pageCount} ...`);
+    const page = await pdfDoc.getPage(p);
+    const vp = page.getViewport({ scale: 1 });
+
+    const scaleX = pageW / vp.width;
+    const scaleY = pageH / vp.height;
+    const fitScale = Math.min(scaleX, scaleY);
+    const qualityBoost = 1.5;
+    const scale = fitScale * dpr * qualityBoost;
+
+    const scaled = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(scaled.width);
+    canvas.height = Math.round(scaled.height);
+    const ctx = canvas.getContext('2d', { alpha:false });
+    await page.render({ canvasContext: ctx, viewport: scaled }).promise;
+    pagesCanvas.push({ canvas, naturalW: scaled.width, naturalH: scaled.height });
+  }
+
+  log('Prerendering completato. Generazione video...');
+
+  const recordCanvas = document.createElement('canvas');
+  recordCanvas.width = videoW;
+  recordCanvas.height = videoH;
+  const rctx = recordCanvas.getContext('2d', { alpha:false });
+
+  rctx.fillStyle = '#000';
+  rctx.fillRect(0,0,videoW,videoH);
+
+  const stream = recordCanvas.captureStream(fps);
+
+  const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+    ? 'video/webm;codecs=vp9'
+    : (MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
+      ? 'video/webm;codecs=vp8'
+      : 'video/webm');
+
+  const options = { mimeType: mime, videoBitsPerSecond: 6_000_000 };
+
+  let recorder;
+  try { recorder = new MediaRecorder(stream, options); }
+  catch(err){
+    alert('Impossibile inizializzare il recorder');
+    generateBtn.disabled = false;
+    return;
+  }
+
+  const chunks = [];
+  recorder.ondataavailable = e=>{ if(e.data.size) chunks.push(e.data); };
+  const waitForStop = ()=> new Promise(r=>recorder.onstop = r);
+
+  recorder.start();
+  log('Recording avviata...');
+
+  function drawFrameForOffset(offsetX){
+    rctx.fillStyle = '#000';
+    rctx.fillRect(0,0,videoW,videoH);
+    for(let k=1;k<=pageCount;k++){
+      const posX = Math.round((k-1)*pageW - offsetX);
+      if(posX + pageW < 0 || posX > videoW) continue;
+      const pc = pagesCanvas[k-1];
+      rctx.drawImage(pc.canvas,0,0,pc.naturalW,pc.naturalH,posX,0,pageW,pageH);
     }
-});
+  }
 
-// —————————————————————————————————————————————
-// GENERATORE VIDEO (VERSIONE CHE FUNZIONAVA)
-// —————————————————————————————————————————————
-document.getElementById("generateButton").addEventListener("click", async () => {
-    const file = document.getElementById("pdfInput").files[0];
-    if (!file) {
-        showMessage("Seleziona un PDF prima!");
-        return;
+  const totalSteps = Math.max(0,pageCount-1);
+
+  for(let step=0; step<totalSteps; step++){
+    const startOffset = step*pageW;
+    const endOffset   = (step+1)*pageW;
+    const startTime   = performance.now();
+
+    while(true){
+      const now = performance.now();
+      const elapsed = now - startTime;
+      const t = Math.min(1, elapsed/(stepSeconds*1000));
+      const offsetX = startOffset + t*(endOffset-startOffset);
+      drawFrameForOffset(offsetX);
+      await new Promise(requestAnimationFrame);
+      if(t>=1) break;
     }
+  }
 
-    showMessage("Generazione video...");
-
-    const resolution = document.getElementById("resolutionSelect").value;
-    const [w, h] = resolution.split("x").map(Number);
-
-    const pdf = await pdfjsLib.getDocument(URL.createObjectURL(file)).promise;
-
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d");
-
-    canvas.width = w;
-    canvas.height = h;
-
-    const stream = canvas.captureStream(30); // 30 FPS
-    const recorder = new MediaRecorder(stream, { mimeType: "video/webm" });
-
-    const chunks = [];
-    recorder.ondataavailable = e => chunks.push(e.data);
-
-    recorder.onstop = () => {
-        const webmBlob = new Blob(chunks, { type: "video/webm" });
-
-        videoBlob = webmBlob;
-        videoReady = true;
-
-        const url = URL.createObjectURL(webmBlob);
-        videoElement.src = url;
-        videoElement.pause();
-
-        showMessage("Video generato!");
-    };
-
-    recorder.start();
-
-    for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const viewport = page.getViewport({ scale: 2 });
-
-        const tempCanvas = document.createElement("canvas");
-        tempCanvas.width = viewport.width;
-        tempCanvas.height = viewport.height;
-        await page.render({ canvasContext: tempCanvas.getContext("2d"), viewport }).promise;
-
-        for (let x = 0; x < viewport.width; x++) {
-            ctx.drawImage(tempCanvas, x, 0, 1, viewport.height, x - (i - 1) * viewport.width, 0, 1, h);
-        }
-
-        await new Promise(r => setTimeout(r, 12000)); // 12s per pagina
+  {
+    const finalOffset = totalSteps*pageW;
+    const holdUntil = performance.now() + 500;
+    while(performance.now() < holdUntil){
+      drawFrameForOffset(finalOffset);
+      await new Promise(requestAnimationFrame);
     }
+  }
 
-    recorder.stop();
+  recorder.stop();
+  await waitForStop();
+
+  const blob = new Blob(chunks,{type:mime});
+  log('Video pronto');
+
+  const url = URL.createObjectURL(blob);
+  player.src = url;
+  player.controls = false;
+  playerWrap.style.display = 'flex';
+  downloadBtn.style.display = 'inline';
+  fullscreenPlayBtn.style.display = 'inline';
+
+  downloadBtn.onclick = ()=>{
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'pdf_scroll.webm';
+    a.click();
+  };
+
+  player.pause();
+  player.currentTime = 0;
+
+  let stepTargetTime = null;
+  function onTimeUpdate(){
+    if(stepTargetTime!==null && player.currentTime >= stepTargetTime - 0.04){
+      player.pause();
+      player.currentTime = Math.min(player.duration, stepTargetTime);
+      stepTargetTime = null;
+    }
+  }
+  player.removeEventListener('timeupdate',onTimeUpdate);
+  player.addEventListener('timeupdate',onTimeUpdate);
+
+  function onKey(ev){
+    if(playerWrap.style.display==='none') return;
+    if(ev.key==='ArrowRight'){
+      if(!player.paused) return;
+      const currentSeg = Math.floor(player.currentTime/stepSeconds);
+      stepTargetTime = Math.min(player.duration,(currentSeg+1)*stepSeconds);
+      player.play().catch(()=>{});
+    }else if(ev.key==='ArrowLeft'){
+      const currentSeg = Math.floor(player.currentTime/stepSeconds);
+      player.currentTime = Math.max(0,(currentSeg-1)*stepSeconds);
+      player.pause();
+    }else if(ev.key==='Escape'){
+      if(document.fullscreenElement) document.exitFullscreen();
+    }
+  }
+  window.removeEventListener('keydown',onKey);
+  window.addEventListener('keydown',onKey);
+
+  fullscreenPlayBtn.onclick = async ()=>{
+    try{
+      if(player.requestFullscreen) await player.requestFullscreen();
+      else if(player.webkitRequestFullscreen) await player.webkitRequestFullscreen();
+    }catch(err){}
+    player.pause();
+    player.currentTime = 0;
+  };
+
+  generateBtn.disabled = false;
+  log("Pronto. Freccia Destra = avanza di 12s, Freccia Sinistra = torna indietro.");
 });
 </script>
-
 </body>
 </html>
