@@ -70,7 +70,8 @@ const playerWrap = document.getElementById('videoWrap');
 const player = document.getElementById('player');
 const resSelect = document.getElementById('resolution');
 const fpsSelect = document.getElementById('fps');
-
+  
+let pdfFileName = 'pdf_scroll'; // default
 let pdfDoc = null;
 let pagesCanvas = [];
 let pageCount = 0;
@@ -83,6 +84,8 @@ function log(s){ status.textContent = s; }
 /* ---- Carica PDF ---- */
 fileInput.addEventListener('change', async e=>{
   const f = e.target.files[0];
+  pdfFileName = f.name.replace(/\.[^/.]+$/, ""); // rimuove estensione .pdf
+
   if(!f) return;
   log('Caricamento PDF...');
   try{
@@ -296,7 +299,8 @@ generateBtn.addEventListener('click', async () => {
   downloadBtn.onclick = ()=>{
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'pdf_scroll.webm';
+    a.download = pdfFileName + '.webm';
+
     a.click();
   };
 
