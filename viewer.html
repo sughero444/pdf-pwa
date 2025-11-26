@@ -1,18 +1,18 @@
 <!doctype html>
 <html lang="it">
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>PDF → Video (Two-page scroll)</title>
-<style>
-  html,body{margin:0;height:100%;background:#000;color:#fff;font-family:system-ui,Arial}
-  .controls{position:fixed;top:10px;left:10px;z-index:999;display:flex;gap:8px;align-items:center;padding:8px}
-  button,input,select{padding:8px;border-radius:6px;border:0;background:#222;color:#fff;cursor:pointer}
-  #status{margin-left:8px;font-size:14px;background:rgba(0,0,0,0.6);padding:4px 8px;border-radius:6px;}
-  #videoWrap{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#000}
-  video{max-width:100%;max-height:100%;background:#000;outline:none}
-  video::-webkit-media-controls { display:none !important; }
-</style>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>PDF → Video (Two-page scroll)</title>
+  <style>
+    html,body{margin:0;height:100%;background:#000;color:#fff;font-family:system-ui,Arial}
+    .controls{position:fixed;top:10px;left:10px;z-index:999;display:flex;gap:8px;align-items:center;padding:8px}
+    button,input,select{padding:8px;border-radius:6px;border:0;background:#222;color:#fff;cursor:pointer}
+    #status{margin-left:8px;font-size:14px;background:rgba(0,0,0,0.6);padding:4px 8px;border-radius:6px;}
+    #videoWrap{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#000}
+    video{max-width:100%;max-height:100%;background:#000;outline:none}
+    video::-webkit-media-controls { display:none !important; }
+  </style>
 </head>
 <body>
 
@@ -34,7 +34,7 @@
   <button id="loadVideoBtn">Carica Video</button>
   <input id="videoInput" type="file" accept="video/*" style="display:none">
 
-  <button id="downloadBtn" style="display:none">Scarica</button>
+  <button id="downloadBtn" style="display:none">Scarica WebM</button>
   <button id="exportMP4Btn" style="display:none">Esporta MP4</button>
   <button id="fullscreenPlayBtn" style="display:none">Schermo intero</button>
 
@@ -48,171 +48,216 @@
 <script src="pdf.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.11.8/dist/ffmpeg.min.js"></script>
 <script>
-pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.js';
-const { createFFmpeg, fetchFile } = FFmpeg;
-const ffmpeg = createFFmpeg({ log: true });
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.js';
 
-const fileInput = document.getElementById('fileInput');
-const videoInput = document.getElementById('videoInput');
-const loadVideoBtn = document.getElementById('loadVideoBtn');
-const generateBtn = document.getElementById('generateBtn');
-const downloadBtn = document.getElementById('downloadBtn');
-const exportMP4Btn = document.getElementById('exportMP4Btn');
-const fullscreenPlayBtn = document.getElementById('fullscreenPlayBtn');
-const status = document.getElementById('status');
-const playerWrap = document.getElementById('videoWrap');
-const player = document.getElementById('player');
-const resSelect = document.getElementById('resolution');
-const fpsSelect = document.getElementById('fps');
+  const { createFFmpeg, fetchFile } = FFmpeg;
+  const ffmpeg = createFFmpeg({ log: false });
 
-let pdfFileName = 'pdf_scroll';
-let pdfDoc = null;
-let pagesCanvas = [];
-let pageCount = 0;
-const stepSeconds = 12;
+  const fileInput = document.getElementById('fileInput');
+  const videoInput = document.getElementById('videoInput');
+  const loadVideoBtn = document.getElementById('loadVideoBtn');
+  const generateBtn = document.getElementById('generateBtn');
+  const downloadBtn = document.getElementById('downloadBtn');
+  const exportMP4Btn = document.getElementById('exportMP4Btn');
+  const fullscreenPlayBtn = document.getElementById('fullscreenPlayBtn');
+  const status = document.getElementById('status');
+  const playerWrap = document.getElementById('videoWrap');
+  const player = document.getElementById('player');
+  const resSelect = document.getElementById('resolution');
+  const fpsSelect = document.getElementById('fps');
 
-function log(s){ status.textContent = s; }
-let latestWebmBlob = null;
-let latestWebmUrl = null;
+  let pdfFileName = 'pdf_scroll';
+  let pdfDoc = null;
+  let pagesCanvas = [];
+  let pageCount = 0;
+  const stepSeconds = 12;
 
-/* ---- Carica PDF ---- */
-fileInput.addEventListener('change', async e=>{
-  const f = e.target.files[0];
-  if (!f) return;
-  pdfFileName = (f.name || 'pdf_scroll').replace(/\.[^/.]+$/, "");
-  log('Caricamento PDF...');
-  try{
-    const buf = await f.arrayBuffer();
-    pdfDoc = await pdfjsLib.getDocument({data:buf}).promise;
-    pageCount = pdfDoc.numPages;
-    log(`PDF caricato — ${pageCount} pagine`);
-  }catch(err){ console.error(err); alert('Errore nel caricamento del PDF'); }
-});
+  let latestWebmBlob = null;
+  let latestWebmUrl = null;
 
-/* ---- Carica VIDEO ---- */
-loadVideoBtn.addEventListener('click', ()=> videoInput.click());
-videoInput.addEventListener('change', e=>{
-  const f = e.target.files[0];
-  if(!f) return;
-  const url = URL.createObjectURL(f);
-  player.src = url;
-  player.controls = false;
-  playerWrap.style.display = 'flex';
-  fullscreenPlayBtn.style.display = 'inline';
-  downloadBtn.style.display = 'none';
-  exportMP4Btn.style.display = 'none';
-  player.pause();
-  player.currentTime = 0;
-  log('Video caricato — pronto per la riproduzione');
-});
-
-/* ---- Generatore video PDF ---- */
-generateBtn.addEventListener('click', async () => {
-  if (!pdfDoc) { alert('Seleziona prima un PDF'); return; }
-  const [videoW, videoH] = resSelect.value.split('x').map(Number);
-  const fps = Number(fpsSelect.value);
-  const pageW = Math.round(videoW / 2);
-  const pageH = videoH;
-
-  generateBtn.disabled = true;
-  log('Prerendering pagine (potrebbe richiede tempo)...');
-
-  pagesCanvas = [];
-  const dpr = window.devicePixelRatio || 1;
-
-  for (let p = 1; p <= pageCount; p++) {
-    log(`Render pagina ${p}/${pageCount} ...`);
-    const page = await pdfDoc.getPage(p);
-    const vp = page.getViewport({ scale: 1 });
-    const scale = Math.min(pageW/vp.width, pageH/vp.height)*dpr*1.5;
-    const scaled = page.getViewport({ scale });
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.round(scaled.width);
-    canvas.height = Math.round(scaled.height);
-    await page.render({ canvasContext: canvas.getContext('2d', { alpha:false }), viewport: scaled }).promise;
-    pagesCanvas.push({ canvas, naturalW: scaled.width, naturalH: scaled.height });
+  function log(msg){
+    status.textContent = msg;
   }
 
-  log('Prerendering completato. Generazione video...');
-  const recordCanvas = document.createElement('canvas');
-  recordCanvas.width = videoW;
-  recordCanvas.height = videoH;
-  const rctx = recordCanvas.getContext('2d', { alpha:false });
-  rctx.fillStyle = '#000';
-  rctx.fillRect(0,0,videoW,videoH);
-  const stream = recordCanvas.captureStream(fps);
-  const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm';
-  const recorder = new MediaRecorder(stream,{ mimeType: mime, videoBitsPerSecond: 6_000_000 });
-  const chunks = [];
-  recorder.ondataavailable = e=>{ if(e.data.size) chunks.push(e.data); };
-  const waitForStop = ()=> new Promise(r=>recorder.onstop = r);
-  recorder.start();
-  log('Recording avviata...');
+  /* --- Carica PDF --- */
+  fileInput.addEventListener('change', async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    pdfFileName = (f.name || 'pdf_scroll').replace(/\.[^/.]+$/, "");
+    log('Caricamento PDF…');
+    try {
+      const buf = await f.arrayBuffer();
+      const loading = pdfjsLib.getDocument({ data: buf });
+      pdfDoc = await loading.promise;
+      pageCount = pdfDoc.numPages;
+      log(`PDF caricato — ${pageCount} pagine`);
+    } catch (err) {
+      console.error(err);
+      alert('Errore nel caricamento del PDF');
+    }
+  });
 
-  function drawFrameForOffset(offsetX){
-    rctx.fillStyle = '#000';
+  /* --- Carica video esterno --- */
+  loadVideoBtn.addEventListener('click', ()=> videoInput.click());
+  videoInput.addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const url = URL.createObjectURL(f);
+    player.src = url;
+    player.controls = false;
+    playerWrap.style.display = 'flex';
+    fullscreenPlayBtn.style.display = 'inline';
+    downloadBtn.style.display = 'none';
+    exportMP4Btn.style.display = 'none';
+    player.pause();
+    player.currentTime = 0;
+    log('Video caricato — pronto per la riproduzione');
+  });
+
+  /* --- Generazione video WebM da PDF --- */
+  generateBtn.addEventListener('click', async () => {
+    if (!pdfDoc) { alert('Seleziona prima un PDF'); return; }
+
+    const [videoW, videoH] = resSelect.value.split('x').map(Number);
+    const fps = Number(fpsSelect.value);
+    const pageW = Math.round(videoW / 2);
+    const pageH = videoH;
+
+    generateBtn.disabled = true;
+    log('Render pagine...');
+
+    pagesCanvas = [];
+    const dpr = window.devicePixelRatio || 1;
+
+    for (let p = 1; p <= pageCount; p++) {
+      log(`Pagina ${p}/${pageCount}`);
+      const page = await pdfDoc.getPage(p);
+      const vp = page.getViewport({ scale:1 });
+      const scale = Math.min(pageW/vp.width, pageH/vp.height) * dpr * 1.5;
+      const scaled = page.getViewport({ scale });
+
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(scaled.width);
+      canvas.height = Math.round(scaled.height);
+
+      const ctx = canvas.getContext('2d', { alpha: false });
+      await page.render({ canvasContext: ctx, viewport: scaled }).promise;
+      pagesCanvas.push({ canvas, naturalW: scaled.width, naturalH: scaled.height });
+    }
+
+    log('Creazione WebM…');
+    const recordCanvas = document.createElement('canvas');
+    recordCanvas.width = videoW;
+    recordCanvas.height = videoH;
+    const rctx = recordCanvas.getContext('2d', { alpha:false });
+    rctx.fillStyle = "#000";
     rctx.fillRect(0,0,videoW,videoH);
-    for(let k=1;k<=pageCount;k++){
-      const posX = Math.round((k-1)*pageW - offsetX);
-      if(posX + pageW < 0 || posX > videoW) continue;
-      const pc = pagesCanvas[k-1];
-      rctx.drawImage(pc.canvas,0,0,pc.naturalW,pc.naturalH,posX,0,pageW,pageH);
-    }
-  }
 
-  const totalSteps = Math.max(0,pageCount-1);
-  for(let step=0; step<totalSteps; step++){
-    const startOffset = step*pageW;
-    const endOffset = (step+1)*pageW;
-    const startTime = performance.now();
-    while(true){
-      const now = performance.now();
-      const t = Math.min(1, (now-startTime)/(stepSeconds*1000));
-      drawFrameForOffset(startOffset + t*(endOffset-startOffset));
+    const stream = recordCanvas.captureStream(fps);
+    const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+                   ? 'video/webm;codecs=vp9'
+                   : 'video/webm';
+    const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 6_000_000 });
+
+    const chunks = [];
+    recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+
+    recorder.start();
+
+    function drawFrame(offsetX){
+      rctx.fillStyle = "#000";
+      rctx.fillRect(0,0,videoW,videoH);
+      for (let k = 1; k <= pageCount; k++){
+        const posX = Math.round((k-1)*pageW - offsetX);
+        if (posX + pageW < 0 || posX > videoW) continue;
+        const pc = pagesCanvas[k-1];
+        rctx.drawImage(pc.canvas, 0, 0, pc.naturalW, pc.naturalH, posX, 0, pageW, pageH);
+      }
+    }
+
+    const totalSteps = Math.max(0, pageCount - 1);
+
+    for (let step = 0; step < totalSteps; step++){
+      const startOffset = step * pageW;
+      const endOffset = (step + 1) * pageW;
+      const startTime = performance.now();
+      while(true){
+        const now = performance.now();
+        const t = Math.min(1, (now - startTime)/(stepSeconds * 1000));
+        drawFrame(startOffset + t*(endOffset - startOffset));
+        await new Promise(requestAnimationFrame);
+        if (t >= 1) break;
+      }
+    }
+
+    // ultimo frame
+    const finalOffset = totalSteps * pageW;
+    const holdUntil = performance.now() + 500;
+    while (performance.now() < holdUntil){
+      drawFrame(finalOffset);
       await new Promise(requestAnimationFrame);
-      if(t>=1) break;
     }
-  }
-  const finalOffset = totalSteps*pageW;
-  const holdUntil = performance.now()+500;
-  while(performance.now()<holdUntil){ drawFrameForOffset(finalOffset); await new Promise(requestAnimationFrame); }
-  recorder.stop();
-  await waitForStop();
 
-  latestWebmBlob = new Blob(chunks,{type:mime});
-  latestWebmUrl = URL.createObjectURL(latestWebmBlob);
-  player.src = latestWebmUrl;
-  playerWrap.style.display='flex';
-  downloadBtn.style.display='inline';
-  exportMP4Btn.style.display='inline';
-  generateBtn.disabled=false;
-  log("Pronto. Freccia Destra = avanza di 12s, Freccia Sinistra = torna indietro.");
-});
+    recorder.stop();
+    await new Promise(r => recorder.onstop = r);
 
-/* ---- EXPORT MP4 COMPATIBILE ANDROID ---- */
-exportMP4Btn.addEventListener('click', async () => {
-  if (!latestWebmBlob) { alert('Nessun video generato da convertire.'); return; }
-  exportMP4Btn.disabled = true;
-  log('Conversione in MP4 compatibile Android...');
+    const blob = new Blob(chunks, { type: mime });
+    latestWebmBlob = blob;
+    latestWebmUrl = URL.createObjectURL(blob);
 
-  if (!ffmpeg.isLoaded()) await ffmpeg.load();
-  ffmpeg.FS('writeFile','input.webm',await fetchFile(latestWebmBlob));
-  await ffmpeg.run('-i','input.webm','-c:v','libx264','-preset','fast','-movflags','faststart','output.mp4');
-  const data = ffmpeg.FS('readFile','output.mp4');
-  const mp4Blob = new Blob([data.buffer],{type:'video/mp4'});
-  const mp4Url = URL.createObjectURL(mp4Blob);
+    player.src = latestWebmUrl;
+    playerWrap.style.display = 'flex';
+    downloadBtn.style.display = 'inline';
+    exportMP4Btn.style.display = 'inline';
 
-  const a = document.createElement('a');
-  a.href = mp4Url;
-  a.download = pdfFileName+'.mp4';
-  a.click();
+    downloadBtn.onclick = () => {
+      const a = document.createElement('a');
+      a.href = latestWebmUrl;
+      a.download = pdfFileName + '.webm';
+      a.click();
+    };
 
-  player.src = mp4Url;
-  playerWrap.style.display='flex';
-  downloadBtn.style.display='inline';
-  exportMP4Btn.disabled=false;
-  log('MP4 pronto e compatibile Android.');
-});
+    player.pause();
+    player.currentTime = 0;
+
+    log('Video creato. WebM pronto.');
+    generateBtn.disabled = false;
+  });
+
+  /* --- Export MP4 compatibile Android via ffmpeg.wasm --- */
+  exportMP4Btn.addEventListener('click', async () => {
+    if (!latestWebmBlob) {
+      alert('Prima genera un video');
+      return;
+    }
+    exportMP4Btn.disabled = true;
+    log('Conversione MP4 in corso…');
+
+    if (!ffmpeg.isLoaded()) await ffmpeg.load();
+    ffmpeg.FS('writeFile', 'in.webm', await fetchFile(latestWebmBlob));
+
+    await ffmpeg.run(
+      '-i', 'in.webm',
+      '-c:v', 'libx264',
+      '-preset', 'fast',
+      '-movflags', 'faststart',
+      'out.mp4'
+    );
+
+    const data = ffmpeg.FS('readFile', 'out.mp4');
+    const mp4Blob = new Blob([data.buffer], { type: 'video/mp4' });
+    const mp4Url = URL.createObjectURL(mp4Blob);
+
+    const a = document.createElement('a');
+    a.href = mp4Url;
+    a.download = pdfFileName + '.mp4';
+    a.click();
+
+    player.src = mp4Url;
+    playerWrap.style.display = 'flex';
+    exportMP4Btn.disabled = false;
+    log('MP4 pronto e compatibile Android.');
+  });
 </script>
 </body>
 </html>
