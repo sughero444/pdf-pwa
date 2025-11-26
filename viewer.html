@@ -46,6 +46,7 @@
   <input id="videoInput" type="file" accept="video/*" style="display:none">
 
   <button id="downloadBtn" style="display:none">Scarica</button>
+  <button id="convertBtn" style="display:none">Converti in MP4</button>
   <button id="fullscreenPlayBtn" style="display:none">Schermo intero</button>
 
   <span id="status"></span>
@@ -54,6 +55,9 @@
 <div id="videoWrap">
   <video id="player" playsinline></video>
 </div>
+
+<!-- ffmpeg.wasm CDN (ver. compatibile). Verrà usato solo se premi Converti in MP4 -->
+<script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.4/dist/ffmpeg.min.js"></script>
 
 <script src="pdf.js"></script>
 <script>
@@ -64,14 +68,14 @@ const videoInput = document.getElementById('videoInput');
 const loadVideoBtn = document.getElementById('loadVideoBtn');
 const generateBtn = document.getElementById('generateBtn');
 const downloadBtn = document.getElementById('downloadBtn');
+const convertBtn = document.getElementById('convertBtn');
 const fullscreenPlayBtn = document.getElementById('fullscreenPlayBtn');
 const status = document.getElementById('status');
 const playerWrap = document.getElementById('videoWrap');
 const player = document.getElementById('player');
 const resSelect = document.getElementById('resolution');
 const fpsSelect = document.getElementById('fps');
-  
-let pdfFileName = 'pdf_scroll'; // default
+
 let pdfDoc = null;
 let pagesCanvas = [];
 let pageCount = 0;
@@ -79,16 +83,21 @@ let pageCount = 0;
 const stepSeconds = 12;
 const pairStride = 1;
 
+// keep the latest generated webm blob & url accessible for conversion
+let latestWebmBlob = null;
+let latestWebmUrl = null;
+let pdfFileName = 'pdf_scroll'; // fallback name if you want to improve later
+
 function log(s){ status.textContent = s; }
 
 /* ---- Carica PDF ---- */
 fileInput.addEventListener('change', async e=>{
   const f = e.target.files[0];
-  pdfFileName = f.name.replace(/\.[^/.]+$/, ""); // rimuove estensione .pdf
-
   if(!f) return;
   log('Caricamento PDF...');
   try{
+    // store filename without extension for potential download naming
+    pdfFileName = (f.name || 'pdf_scroll').replace(/\.[^/.]+$/, "");
     const buf = await f.arrayBuffer();
     pdfDoc = await pdfjsLib.getDocument({data:buf}).promise;
     pageCount = pdfDoc.numPages;
@@ -113,6 +122,7 @@ videoInput.addEventListener('change', e=>{
   playerWrap.style.display = 'flex';
   fullscreenPlayBtn.style.display = 'inline';
   downloadBtn.style.display = 'none';
+  convertBtn.style.display = 'none';
 
   player.pause();
   player.currentTime = 0;
@@ -127,7 +137,6 @@ videoInput.addEventListener('change', e=>{
       if(player.requestFullscreen) await player.requestFullscreen();
       else if(player.webkitRequestFullscreen) await player.webkitRequestFullscreen();
     }catch(err){}
-
     player.pause();
     player.currentTime = 0;
   };
@@ -171,7 +180,6 @@ videoInput.addEventListener('change', e=>{
   window.removeEventListener('keydown', onKey);
   window.addEventListener('keydown', onKey);
 });
-
 
 /* ---- GENERATORE VIDEO PDF ---- */
 /* (IMPORTANTE: identico alla tua versione funzionante, senza modifiche!) */
@@ -233,13 +241,14 @@ generateBtn.addEventListener('click', async () => {
   let recorder;
   try { recorder = new MediaRecorder(stream, options); }
   catch(err){
-    alert('Impossibile inizializzare il recorder');
+    alert('Impossibile inizializzare il recorder nel browser corrente.');
     generateBtn.disabled = false;
     return;
   }
 
   const chunks = [];
   recorder.ondataavailable = e=>{ if(e.data.size) chunks.push(e.data); };
+  recorder.onerror = (e) => console.error('Recorder error', e);
   const waitForStop = ()=> new Promise(r=>recorder.onstop = r);
 
   recorder.start();
@@ -260,8 +269,8 @@ generateBtn.addEventListener('click', async () => {
 
   for(let step=0; step<totalSteps; step++){
     const startOffset = step*pageW;
-    const endOffset   = (step+1)*pageW;
-    const startTime   = performance.now();
+    const endOffset = (step+1)*pageW;
+    const startTime = performance.now();
 
     while(true){
       const now = performance.now();
@@ -294,13 +303,17 @@ generateBtn.addEventListener('click', async () => {
   player.controls = false;
   playerWrap.style.display = 'flex';
   downloadBtn.style.display = 'inline';
+  convertBtn.style.display = 'inline';
   fullscreenPlayBtn.style.display = 'inline';
+
+  // remember latest webm for possible conversion
+  latestWebmBlob = blob;
+  latestWebmUrl = url;
 
   downloadBtn.onclick = ()=>{
     const a = document.createElement('a');
     a.href = url;
-    a.download = pdfFileName + '.webm';
-
+    a.download = 'pdf_scroll.webm';
     a.click();
   };
 
@@ -347,6 +360,74 @@ generateBtn.addEventListener('click', async () => {
 
   generateBtn.disabled = false;
   log("Pronto. Freccia Destra = avanza di 12s, Freccia Sinistra = torna indietro.");
+});
+
+/* ---------------------------------------------------
+   Converti in MP4 on-demand (usando ffmpeg.wasm)
+   - attivato SOLO quando premi convertBtn
+----------------------------------------------------*/
+convertBtn.addEventListener('click', async () => {
+  if (!latestWebmBlob) { alert('Nessun video generato da convertire.'); return; }
+
+  // minimal UI feedback
+  log('Caricamento encoder (ffmpeg.wasm) — attendere...');
+  convertBtn.disabled = true;
+
+  try {
+    const { createFFmpeg, fetchFile } = FFmpeg;
+    const ffmpeg = createFFmpeg({ log: true });
+    if (!ffmpeg.isLoaded()) {
+      await ffmpeg.load();
+    }
+
+    log('Scrivo file temporaneo in memoria virtuale...');
+    // write input.webm
+    ffmpeg.FS('writeFile', 'input.webm', await fetchFile(latestWebmBlob));
+
+    log('Conversione in corso (webm → mp4) — questo può richiedere diversi secondi...');
+    // run ffmpeg -i input.webm -c:v libx264 -preset fast -crf 23 -movflags faststart output.mp4
+    // note: ffmpeg.wasm può non avere tutti i presets, ma questa è una buona combinazione
+    await ffmpeg.run('-i', 'input.webm', '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-movflags', 'faststart', 'output.mp4');
+
+    log('Lettura file MP4 generato...');
+    const data = ffmpeg.FS('readFile', 'output.mp4');
+
+    const mp4Blob = new Blob([data.buffer], { type: 'video/mp4' });
+    const mp4Url = URL.createObjectURL(mp4Blob);
+
+    // offri download e permetti la riproduzione nell'player
+    const a = document.createElement('a');
+    a.href = mp4Url;
+    a.download = 'pdf_scroll.mp4';
+    // show a temporary UI: change convert button to "Scarica MP4"
+    convertBtn.textContent = 'Scarica MP4';
+    convertBtn.style.display = 'inline';
+    convertBtn.disabled = false;
+
+    // when clicking convertBtn now, download the mp4
+    convertBtn.onclick = () => { a.click(); };
+
+    // also let user play the mp4 in player (preserve stepping behavior)
+    player.src = mp4Url;
+    player.controls = false;
+    player.pause();
+    player.currentTime = 0;
+    playerWrap.style.display = 'flex';
+    fullscreenPlayBtn.style.display = 'inline';
+    downloadBtn.style.display = 'inline'; // keep webm download too
+
+    log('MP4 pronto. Premi "Scarica MP4" per salvarlo oppure usa Freccia Destra per riprodurlo a step.');
+
+    // free FFmpeg FS entries to reduce memory
+    try { ffmpeg.FS('unlink', 'input.webm'); } catch(e){}
+    try { ffmpeg.FS('unlink', 'output.mp4'); } catch(e){}
+
+  } catch (err) {
+    console.error('Errore conversione MP4', err);
+    alert('Errore nella conversione in MP4: vedi console.');
+    convertBtn.disabled = false;
+    convertBtn.textContent = 'Converti in MP4';
+  }
 });
 </script>
 </body>
