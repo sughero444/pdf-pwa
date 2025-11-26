@@ -21,7 +21,6 @@
   #videoWrap{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#000}
   video{max-width:100%;max-height:100%;background:#000;outline:none}
 
-  /* Rimuove overlay dei controlli in pausa su alcuni browser */
   video::-webkit-media-controls { display:none !important; }
 </style>
 </head>
@@ -29,25 +28,12 @@
 
 <div class="controls">
   <input id="fileInput" type="file" accept="application/pdf">
-  <label style="display:flex;gap:6px;align-items:center;color:#ddd">
-    Ris:
-    <select id="resolution">
-      <option value="1280x720">1280×720</option>
-      <option value="1920x1080" selected>1920×1080</option>
-      <option value="3840x2160">3840×2160 (heavy)</option>
-    </select>
-  </label>
-  <label style="color:#ddd">FPS:
-    <select id="fps"><option>24</option><option>25</option><option selected>30</option></select>
-  </label>
 
-  <button id="generateBtn">Genera Video</button>
   <button id="loadVideoBtn">Carica Video</button>
   <input id="videoInput" type="file" accept="video/*" style="display:none">
 
   <button id="downloadBtn" style="display:none">Scarica</button>
 
-  <!-- AGGIUNTA: Esporta MP4 (compare dopo la generazione) -->
   <button id="exportMP4Btn" style="display:none">Esporta MP4</button>
 
   <button id="fullscreenPlayBtn" style="display:none">Schermo intero</button>
@@ -66,35 +52,30 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.js';
 const fileInput = document.getElementById('fileInput');
 const videoInput = document.getElementById('videoInput');
 const loadVideoBtn = document.getElementById('loadVideoBtn');
-const generateBtn = document.getElementById('generateBtn');
 const downloadBtn = document.getElementById('downloadBtn');
-const exportMP4Btn = document.getElementById('exportMP4Btn'); // nuovo
+const exportMP4Btn = document.getElementById('exportMP4Btn'); 
 const fullscreenPlayBtn = document.getElementById('fullscreenPlayBtn');
 const status = document.getElementById('status');
 const playerWrap = document.getElementById('videoWrap');
 const player = document.getElementById('player');
-const resSelect = document.getElementById('resolution');
-const fpsSelect = document.getElementById('fps');
-  
-let pdfFileName = 'pdf_scroll'; // default
+
+let pdfFileName = 'pdf_scroll';
 let pdfDoc = null;
 let pagesCanvas = [];
 let pageCount = 0;
 
 const stepSeconds = 12;
-const pairStride = 1;
 
 function log(s){ status.textContent = s; }
 
-/* keep latest generated webm for conversion */
 let latestWebmBlob = null;
 let latestWebmUrl = null;
 
-/* ---- Carica PDF ---- */
+/* ---- Carica PDF e genera automaticamente il video ---- */
 fileInput.addEventListener('change', async e=>{
   const f = e.target.files[0];
   if (!f) return;
-  pdfFileName = (f.name || 'pdf_scroll').replace(/\.[^/.]+$/, ""); // rimuove estensione .pdf
+  pdfFileName = (f.name || 'pdf_scroll').replace(/\.[^/.]+$/, "");
 
   log('Caricamento PDF...');
   try{
@@ -102,6 +83,9 @@ fileInput.addEventListener('change', async e=>{
     pdfDoc = await pdfjsLib.getDocument({data:buf}).promise;
     pageCount = pdfDoc.numPages;
     log(`PDF caricato — ${pageCount} pagine`);
+
+    // Generazione video automatica (risoluzione fissa 1920x1080, FPS 30)
+    generateVideo(1920,1080,30);
   }catch(err){
     console.error(err);
     alert('Errore nel caricamento del PDF');
@@ -110,7 +94,6 @@ fileInput.addEventListener('change', async e=>{
 
 /* ---- Carica VIDEO ---- */
 loadVideoBtn.addEventListener('click', ()=> videoInput.click());
-
 videoInput.addEventListener('change', e=>{
   const f = e.target.files[0];
   if(!f) return;
@@ -129,25 +112,16 @@ videoInput.addEventListener('change', e=>{
 
   log('Video caricato — pronto per la riproduzione');
 
-  /* ---------------------------------------------------------
-     FULLSCREEN identico ai video generati
-  --------------------------------------------------------- */
   fullscreenPlayBtn.onclick = async ()=>{
     try{
       if(player.requestFullscreen) await player.requestFullscreen();
       else if(player.webkitRequestFullscreen) await player.webkitRequestFullscreen();
     }catch(err){}
-
     player.pause();
     player.currentTime = 0;
   };
 
-  /* ---------------------------------------------------------
-     🔥 AGGIUNTO: motore di avanzamento identico ai video generati
-     (Freccia Destra = avanza 12s + stop automatico)
-  --------------------------------------------------------- */
   let stepTargetTime = null;
-
   function onTimeUpdate(){
     if(stepTargetTime!==null && player.currentTime >= stepTargetTime - 0.04){
       player.pause();
@@ -182,21 +156,14 @@ videoInput.addEventListener('change', e=>{
   window.addEventListener('keydown', onKey);
 });
 
-
-/* ---- GENERATORE VIDEO PDF ---- */
-/* (IMPORTANTE: identico alla tua versione funzionante, senza modifiche!) */
-
-generateBtn.addEventListener('click', async () => {
+/* ---- FUNZIONE GENERA VIDEO ---- */
+async function generateVideo(videoW, videoH, fps){
   if (!pdfDoc) { alert('Seleziona prima un PDF'); return; }
 
-  const [videoW, videoH] = resSelect.value.split('x').map(Number);
-  const fps = Number(fpsSelect.value);
   const pageW = Math.round(videoW / 2);
   const pageH = videoH;
 
-  generateBtn.disabled = true;
   log('Prerendering pagine (potrebbe richiedere tempo)...');
-
   pagesCanvas = [];
   const dpr = window.devicePixelRatio || 1;
 
@@ -226,7 +193,6 @@ generateBtn.addEventListener('click', async () => {
   recordCanvas.width = videoW;
   recordCanvas.height = videoH;
   const rctx = recordCanvas.getContext('2d', { alpha:false });
-
   rctx.fillStyle = '#000';
   rctx.fillRect(0,0,videoW,videoH);
 
@@ -239,12 +205,10 @@ generateBtn.addEventListener('click', async () => {
       : 'video/webm');
 
   const options = { mimeType: mime, videoBitsPerSecond: 6_000_000 };
-
   let recorder;
   try { recorder = new MediaRecorder(stream, options); }
   catch(err){
     alert('Impossibile inizializzare il recorder');
-    generateBtn.disabled = false;
     return;
   }
 
@@ -267,12 +231,10 @@ generateBtn.addEventListener('click', async () => {
   }
 
   const totalSteps = Math.max(0,pageCount-1);
-
   for(let step=0; step<totalSteps; step++){
     const startOffset = step*pageW;
     const endOffset   = (step+1)*pageW;
     const startTime   = performance.now();
-
     while(true){
       const now = performance.now();
       const elapsed = now - startTime;
@@ -306,189 +268,25 @@ generateBtn.addEventListener('click', async () => {
   downloadBtn.style.display = 'inline';
   fullscreenPlayBtn.style.display = 'inline';
 
-  // save latest webm for conversion
   latestWebmBlob = blob;
   latestWebmUrl = url;
 
-  downloadBtn.onclick = ()=>{
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = pdfFileName + '.webm';
-    a.click();
-  };
+  downloadBtn.onclick = ()=>{ const a=document.createElement('a'); a.href=url; a.download=pdfFileName+'.webm'; a.click(); };
 
   player.pause();
   player.currentTime = 0;
 
   let stepTargetTime = null;
-  function onTimeUpdate(){
-    if(stepTargetTime!==null && player.currentTime >= stepTargetTime - 0.04){
-      player.pause();
-      player.currentTime = Math.min(player.duration, stepTargetTime);
-      stepTargetTime = null;
-    }
-  }
+  function onTimeUpdate(){ if(stepTargetTime!==null && player.currentTime >= stepTargetTime - 0.04){ player.pause(); player.currentTime=Math.min(player.duration,stepTargetTime); stepTargetTime=null; } }
   player.removeEventListener('timeupdate',onTimeUpdate);
   player.addEventListener('timeupdate',onTimeUpdate);
 
-  function onKey(ev){
-    if(playerWrap.style.display==='none') return;
-    if(ev.key==='ArrowRight'){
-      if(!player.paused) return;
-      const currentSeg = Math.floor(player.currentTime/stepSeconds);
-      stepTargetTime = Math.min(player.duration,(currentSeg+1)*stepSeconds);
-      player.play().catch(()=>{});
-    }else if(ev.key==='ArrowLeft'){
-      const currentSeg = Math.floor(player.currentTime/stepSeconds);
-      player.currentTime = Math.max(0,(currentSeg-1)*stepSeconds);
-      player.pause();
-    }else if(ev.key==='Escape'){
-      if(document.fullscreenElement) document.exitFullscreen();
-    }
-  }
-  window.removeEventListener('keydown',onKey);
-  window.addEventListener('keydown',onKey);
+  fullscreenPlayBtn.onclick = async ()=>{ try{ if(player.requestFullscreen) await player.requestFullscreen(); else if(player.webkitRequestFullscreen) await player.webkitRequestFullscreen(); }catch(err){} player.pause(); player.currentTime=0; };
 
-  fullscreenPlayBtn.onclick = async ()=>{
-    try{
-      if(player.requestFullscreen) await player.requestFullscreen();
-      else if(player.webkitRequestFullscreen) await player.webkitRequestFullscreen();
-    }catch(err){}
-    player.pause();
-    player.currentTime = 0;
-  };
-
-  // show convert button after successful generation
   exportMP4Btn.style.display = 'inline';
 
-  generateBtn.disabled = false;
   log("Pronto. Freccia Destra = avanza di 12s, Freccia Sinistra = torna indietro.");
-});
-
-/* ---------------------------------------------------
-   EXPORT MP4 (hardware) - AGGIUNTA
-   - eseguita ON DEMAND quando premi exportMP4Btn
-----------------------------------------------------*/
-exportMP4Btn.addEventListener('click', async () => {
-  if (!latestWebmBlob) { alert('Nessun video generato da convertire.'); return; }
-  exportMP4Btn.disabled = true;
-  log('Preparazione conversione in MP4 (hardware)...');
-
-  // create a temporary video element to play the webm
-  const tmp = document.createElement('video');
-  tmp.muted = true; // allow autoplay in many browsers
-  tmp.playsInline = true;
-  tmp.src = latestWebmUrl;
-
-  // wait for metadata so duration is known
-  await new Promise((res, rej) => {
-    const t = setTimeout(() => rej(new Error('timeout loading media')), 10000);
-    tmp.addEventListener('loadedmetadata', () => { clearTimeout(t); res(); }, { once: true });
-    tmp.addEventListener('error', (e) => { clearTimeout(t); rej(new Error('errore caricamento media')); }, { once: true });
-  }).catch(err => {
-    console.error('load metadata error', err);
-    alert('Impossibile caricare il video temporaneo per la conversione.');
-    exportMP4Btn.disabled = false;
-    log('');
-    return;
-  });
-
-  // attempt to find an MP4 mime the browser supports for MediaRecorder
-  const candidates = [
-    'video/mp4;codecs="avc1.42E01E"',
-    'video/mp4;codecs="avc1.4d401e"',
-    'video/mp4'
-  ];
-  let chosen = null;
-  for (const c of candidates) {
-    try {
-      if (MediaRecorder.isTypeSupported(c)) { chosen = c; break; }
-    } catch(e){}
-  }
-
-  if (!chosen) {
-    alert('Questo browser non supporta l\'encoding MP4 via MediaRecorder. Se necessario posso usare ffmpeg.wasm (ma richiede CORP/COOP headers) o puoi fare mirroring dello schermo.');
-    exportMP4Btn.disabled = false;
-    log('');
-    return;
-  }
-
-  log('Formato MP4 supportato: ' + chosen + ' — registrazione in corso...');
-
-  // capture stream from the tmp video
-  const stream = tmp.captureStream ? tmp.captureStream() : null;
-  if (!stream) {
-    alert('captureStream non supportato in questo browser.');
-    exportMP4Btn.disabled = false;
-    log('');
-    return;
-  }
-
-  let recorder;
-  try {
-    recorder = new MediaRecorder(stream, { mimeType: chosen, videoBitsPerSecond: 6_000_000 });
-  } catch (err) {
-    console.error('MediaRecorder init failed for mp4', err);
-    alert('Impossibile inizializzare il recorder MP4 in questo browser.');
-    exportMP4Btn.disabled = false;
-    log('');
-    return;
-  }
-
-  const parts = [];
-  recorder.ondataavailable = (e) => { if (e.data && e.data.size) parts.push(e.data); };
-  recorder.onerror = (e) => console.error('recorder mp4 error', e);
-
-  // start recorder, play the tmp video all the way through
-  recorder.start();
-
-  // in some browsers we need to call play() as a user gesture; we're inside a click handler so OK
-  try {
-    await tmp.play();
-  } catch(e){
-    // if autoplay prevented, try again after small delay
-    try { tmp.muted = true; await tmp.play(); } catch(e2) {}
-  }
-
-  // stop recorder when video ends (or after duration)
-  await new Promise((resolve) => {
-    tmp.addEventListener('ended', () => {
-      // give recorder a small moment to flush
-      setTimeout(() => {
-        try { recorder.stop(); } catch(e){}
-      }, 200);
-    }, { once: true });
-
-    recorder.onstop = () => resolve();
-    // safety: also stop after tmp.duration + 1s if 'ended' didn't fire
-    setTimeout(() => {
-      try { recorder.state !== 'inactive' && recorder.stop(); } catch(e){}
-    }, (tmp.duration + 1) * 1000);
-  });
-
-  // build mp4 blob
-  const mp4Blob = new Blob(parts, { type: chosen });
-  const mp4Url = URL.createObjectURL(mp4Blob);
-
-  // offer download with same base name as PDF
-  const a = document.createElement('a');
-  a.href = mp4Url;
-  a.download = pdfFileName + '.mp4';
-  a.click();
-
-  // also load mp4 into player (keeping stepping behavior)
-  player.src = mp4Url;
-  player.controls = false;
-  player.pause();
-  player.currentTime = 0;
-  playerWrap.style.display = 'flex';
-  fullscreenPlayBtn.style.display = 'inline';
-  downloadBtn.style.display = 'inline';
-
-  // allow re-export after finishing
-  exportMP4Btn.disabled = false;
-  log('MP4 pronto e caricato nel player (puoi scaricarlo o riprodurlo).');
-});
+}
 
 </script>
 </body>
