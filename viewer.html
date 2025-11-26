@@ -60,8 +60,6 @@
 </div>
 
 <script src="pdf.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.11.8/dist/ffmpeg.min.js"></script>
-
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.js';
 
@@ -77,9 +75,6 @@ const playerWrap = document.getElementById('videoWrap');
 const player = document.getElementById('player');
 const resSelect = document.getElementById('resolution');
 const fpsSelect = document.getElementById('fps');
-const { createFFmpeg, fetchFile } = FFmpeg;
-const ffmpeg = createFFmpeg({ log: false });
-
   
 let pdfFileName = 'pdf_scroll'; // default
 let pdfDoc = null;
@@ -377,28 +372,111 @@ generateBtn.addEventListener('click', async () => {
 exportMP4Btn.addEventListener('click', async () => {
   if (!latestWebmBlob) { alert('Nessun video generato da convertire.'); return; }
   exportMP4Btn.disabled = true;
-  log('Conversione MP4 compatibile Android in corso...');
+  log('Preparazione conversione in MP4 (hardware)...');
 
-  if (!ffmpeg.isLoaded()) await ffmpeg.load();
+  // create a temporary video element to play the webm
+  const tmp = document.createElement('video');
+  tmp.muted = true; // allow autoplay in many browsers
+  tmp.playsInline = true;
+  tmp.src = latestWebmUrl;
 
-  // scrivi il WebM generato su file virtuale ffmpeg
-  ffmpeg.FS('writeFile', 'in.webm', await fetchFile(latestWebmBlob));
+  // wait for metadata so duration is known
+  await new Promise((res, rej) => {
+    const t = setTimeout(() => rej(new Error('timeout loading media')), 10000);
+    tmp.addEventListener('loadedmetadata', () => { clearTimeout(t); res(); }, { once: true });
+    tmp.addEventListener('error', (e) => { clearTimeout(t); rej(new Error('errore caricamento media')); }, { once: true });
+  }).catch(err => {
+    console.error('load metadata error', err);
+    alert('Impossibile caricare il video temporaneo per la conversione.');
+    exportMP4Btn.disabled = false;
+    log('');
+    return;
+  });
 
-  // converte in MP4 H.264 compatibile Android
-  await ffmpeg.run('-i', 'in.webm', '-c:v', 'libx264', '-preset', 'fast', '-movflags', 'faststart', 'out.mp4');
+  // attempt to find an MP4 mime the browser supports for MediaRecorder
+  const candidates = [
+    'video/mp4;codecs="avc1.42E01E"',
+    'video/mp4;codecs="avc1.4d401e"',
+    'video/mp4'
+  ];
+  let chosen = null;
+  for (const c of candidates) {
+    try {
+      if (MediaRecorder.isTypeSupported(c)) { chosen = c; break; }
+    } catch(e){}
+  }
 
-  // leggi il risultato
-  const data = ffmpeg.FS('readFile', 'out.mp4');
-  const mp4Blob = new Blob([data.buffer], { type: 'video/mp4' });
+  if (!chosen) {
+    alert('Questo browser non supporta l\'encoding MP4 via MediaRecorder. Se necessario posso usare ffmpeg.wasm (ma richiede CORP/COOP headers) o puoi fare mirroring dello schermo.');
+    exportMP4Btn.disabled = false;
+    log('');
+    return;
+  }
+
+  log('Formato MP4 supportato: ' + chosen + ' — registrazione in corso...');
+
+  // capture stream from the tmp video
+  const stream = tmp.captureStream ? tmp.captureStream() : null;
+  if (!stream) {
+    alert('captureStream non supportato in questo browser.');
+    exportMP4Btn.disabled = false;
+    log('');
+    return;
+  }
+
+  let recorder;
+  try {
+    recorder = new MediaRecorder(stream, { mimeType: chosen, videoBitsPerSecond: 6_000_000 });
+  } catch (err) {
+    console.error('MediaRecorder init failed for mp4', err);
+    alert('Impossibile inizializzare il recorder MP4 in questo browser.');
+    exportMP4Btn.disabled = false;
+    log('');
+    return;
+  }
+
+  const parts = [];
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) parts.push(e.data); };
+  recorder.onerror = (e) => console.error('recorder mp4 error', e);
+
+  // start recorder, play the tmp video all the way through
+  recorder.start();
+
+  // in some browsers we need to call play() as a user gesture; we're inside a click handler so OK
+  try {
+    await tmp.play();
+  } catch(e){
+    // if autoplay prevented, try again after small delay
+    try { tmp.muted = true; await tmp.play(); } catch(e2) {}
+  }
+
+  // stop recorder when video ends (or after duration)
+  await new Promise((resolve) => {
+    tmp.addEventListener('ended', () => {
+      // give recorder a small moment to flush
+      setTimeout(() => {
+        try { recorder.stop(); } catch(e){}
+      }, 200);
+    }, { once: true });
+
+    recorder.onstop = () => resolve();
+    // safety: also stop after tmp.duration + 1s if 'ended' didn't fire
+    setTimeout(() => {
+      try { recorder.state !== 'inactive' && recorder.stop(); } catch(e){}
+    }, (tmp.duration + 1) * 1000);
+  });
+
+  // build mp4 blob
+  const mp4Blob = new Blob(parts, { type: chosen });
   const mp4Url = URL.createObjectURL(mp4Blob);
 
-  // download MP4
+  // offer download with same base name as PDF
   const a = document.createElement('a');
   a.href = mp4Url;
   a.download = pdfFileName + '.mp4';
   a.click();
 
-  // carica nel player
+  // also load mp4 into player (keeping stepping behavior)
   player.src = mp4Url;
   player.controls = false;
   player.pause();
@@ -407,10 +485,10 @@ exportMP4Btn.addEventListener('click', async () => {
   fullscreenPlayBtn.style.display = 'inline';
   downloadBtn.style.display = 'inline';
 
+  // allow re-export after finishing
   exportMP4Btn.disabled = false;
-  log('MP4 pronto e compatibile Android');
+  log('MP4 pronto e caricato nel player (puoi scaricarlo o riprodurlo).');
 });
-
 
 </script>
 </body>
