@@ -46,6 +46,10 @@
   <input id="videoInput" type="file" accept="video/*" style="display:none">
 
   <button id="downloadBtn" style="display:none">Scarica</button>
+
+  <!-- AGGIUNTA: Esporta MP4 (compare dopo la generazione) -->
+  <button id="exportMP4Btn" style="display:none">Esporta MP4</button>
+
   <button id="fullscreenPlayBtn" style="display:none">Schermo intero</button>
 
   <span id="status"></span>
@@ -64,6 +68,7 @@ const videoInput = document.getElementById('videoInput');
 const loadVideoBtn = document.getElementById('loadVideoBtn');
 const generateBtn = document.getElementById('generateBtn');
 const downloadBtn = document.getElementById('downloadBtn');
+const exportMP4Btn = document.getElementById('exportMP4Btn'); // nuovo
 const fullscreenPlayBtn = document.getElementById('fullscreenPlayBtn');
 const status = document.getElementById('status');
 const playerWrap = document.getElementById('videoWrap');
@@ -81,12 +86,16 @@ const pairStride = 1;
 
 function log(s){ status.textContent = s; }
 
+/* keep latest generated webm for conversion */
+let latestWebmBlob = null;
+let latestWebmUrl = null;
+
 /* ---- Carica PDF ---- */
 fileInput.addEventListener('change', async e=>{
   const f = e.target.files[0];
-  pdfFileName = f.name.replace(/\.[^/.]+$/, ""); // rimuove estensione .pdf
+  if (!f) return;
+  pdfFileName = (f.name || 'pdf_scroll').replace(/\.[^/.]+$/, ""); // rimuove estensione .pdf
 
-  if(!f) return;
   log('Caricamento PDF...');
   try{
     const buf = await f.arrayBuffer();
@@ -113,6 +122,7 @@ videoInput.addEventListener('change', e=>{
   playerWrap.style.display = 'flex';
   fullscreenPlayBtn.style.display = 'inline';
   downloadBtn.style.display = 'none';
+  exportMP4Btn.style.display = 'none';
 
   player.pause();
   player.currentTime = 0;
@@ -296,11 +306,14 @@ generateBtn.addEventListener('click', async () => {
   downloadBtn.style.display = 'inline';
   fullscreenPlayBtn.style.display = 'inline';
 
+  // save latest webm for conversion
+  latestWebmBlob = blob;
+  latestWebmUrl = url;
+
   downloadBtn.onclick = ()=>{
     const a = document.createElement('a');
     a.href = url;
     a.download = pdfFileName + '.webm';
-
     a.click();
   };
 
@@ -345,9 +358,138 @@ generateBtn.addEventListener('click', async () => {
     player.currentTime = 0;
   };
 
+  // show convert button after successful generation
+  exportMP4Btn.style.display = 'inline';
+
   generateBtn.disabled = false;
   log("Pronto. Freccia Destra = avanza di 12s, Freccia Sinistra = torna indietro.");
 });
+
+/* ---------------------------------------------------
+   EXPORT MP4 (hardware) - AGGIUNTA
+   - eseguita ON DEMAND quando premi exportMP4Btn
+----------------------------------------------------*/
+exportMP4Btn.addEventListener('click', async () => {
+  if (!latestWebmBlob) { alert('Nessun video generato da convertire.'); return; }
+  exportMP4Btn.disabled = true;
+  log('Preparazione conversione in MP4 (hardware)...');
+
+  // create a temporary video element to play the webm
+  const tmp = document.createElement('video');
+  tmp.muted = true; // allow autoplay in many browsers
+  tmp.playsInline = true;
+  tmp.src = latestWebmUrl;
+
+  // wait for metadata so duration is known
+  await new Promise((res, rej) => {
+    const t = setTimeout(() => rej(new Error('timeout loading media')), 10000);
+    tmp.addEventListener('loadedmetadata', () => { clearTimeout(t); res(); }, { once: true });
+    tmp.addEventListener('error', (e) => { clearTimeout(t); rej(new Error('errore caricamento media')); }, { once: true });
+  }).catch(err => {
+    console.error('load metadata error', err);
+    alert('Impossibile caricare il video temporaneo per la conversione.');
+    exportMP4Btn.disabled = false;
+    log('');
+    return;
+  });
+
+  // attempt to find an MP4 mime the browser supports for MediaRecorder
+  const candidates = [
+    'video/mp4;codecs="avc1.42E01E"',
+    'video/mp4;codecs="avc1.4d401e"',
+    'video/mp4'
+  ];
+  let chosen = null;
+  for (const c of candidates) {
+    try {
+      if (MediaRecorder.isTypeSupported(c)) { chosen = c; break; }
+    } catch(e){}
+  }
+
+  if (!chosen) {
+    alert('Questo browser non supporta l\'encoding MP4 via MediaRecorder. Se necessario posso usare ffmpeg.wasm (ma richiede CORP/COOP headers) o puoi fare mirroring dello schermo.');
+    exportMP4Btn.disabled = false;
+    log('');
+    return;
+  }
+
+  log('Formato MP4 supportato: ' + chosen + ' — registrazione in corso...');
+
+  // capture stream from the tmp video
+  const stream = tmp.captureStream ? tmp.captureStream() : null;
+  if (!stream) {
+    alert('captureStream non supportato in questo browser.');
+    exportMP4Btn.disabled = false;
+    log('');
+    return;
+  }
+
+  let recorder;
+  try {
+    recorder = new MediaRecorder(stream, { mimeType: chosen, videoBitsPerSecond: 6_000_000 });
+  } catch (err) {
+    console.error('MediaRecorder init failed for mp4', err);
+    alert('Impossibile inizializzare il recorder MP4 in questo browser.');
+    exportMP4Btn.disabled = false;
+    log('');
+    return;
+  }
+
+  const parts = [];
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) parts.push(e.data); };
+  recorder.onerror = (e) => console.error('recorder mp4 error', e);
+
+  // start recorder, play the tmp video all the way through
+  recorder.start();
+
+  // in some browsers we need to call play() as a user gesture; we're inside a click handler so OK
+  try {
+    await tmp.play();
+  } catch(e){
+    // if autoplay prevented, try again after small delay
+    try { tmp.muted = true; await tmp.play(); } catch(e2) {}
+  }
+
+  // stop recorder when video ends (or after duration)
+  await new Promise((resolve) => {
+    tmp.addEventListener('ended', () => {
+      // give recorder a small moment to flush
+      setTimeout(() => {
+        try { recorder.stop(); } catch(e){}
+      }, 200);
+    }, { once: true });
+
+    recorder.onstop = () => resolve();
+    // safety: also stop after tmp.duration + 1s if 'ended' didn't fire
+    setTimeout(() => {
+      try { recorder.state !== 'inactive' && recorder.stop(); } catch(e){}
+    }, (tmp.duration + 1) * 1000);
+  });
+
+  // build mp4 blob
+  const mp4Blob = new Blob(parts, { type: chosen });
+  const mp4Url = URL.createObjectURL(mp4Blob);
+
+  // offer download with same base name as PDF
+  const a = document.createElement('a');
+  a.href = mp4Url;
+  a.download = pdfFileName + '.mp4';
+  a.click();
+
+  // also load mp4 into player (keeping stepping behavior)
+  player.src = mp4Url;
+  player.controls = false;
+  player.pause();
+  player.currentTime = 0;
+  playerWrap.style.display = 'flex';
+  fullscreenPlayBtn.style.display = 'inline';
+  downloadBtn.style.display = 'inline';
+
+  // allow re-export after finishing
+  exportMP4Btn.disabled = false;
+  log('MP4 pronto e caricato nel player (puoi scaricarlo o riprodurlo).');
+});
+
 </script>
 </body>
 </html>
